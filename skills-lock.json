@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review-and-quality": {
+      "source": "yofriadi/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-review-and-quality/SKILL.md",
+      "computedHash": "ac1c5015ae5289ec780c3cdb107ad0d506b1da9d0d1111e59cbeb106c7717a5d"
+    },
+    "performance-optimization": {
+      "source": "yofriadi/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/performance-optimization/SKILL.md",
+      "computedHash": "d5389a46a0c9e193530dc25cf6175934a02525be443d959d23348e0ec942af0b"
+    },
+    "security-and-hardening": {
+      "source": "yofriadi/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/security-and-hardening/SKILL.md",
+      "computedHash": "d35358cd6151d8e8efc3ac72cdf19a56402a81dc7fcfcca547f91b8ae33d2f64"
+    }
+  }
+}

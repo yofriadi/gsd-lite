@@ -1,0 +1,30 @@
+{
+  "plan": 1,
+  "title": "01-01 Bootstrap working slice",
+  "objective": "Create the thinnest working slice for the phase goal.",
+  "wave": 1,
+  "depends_on": [],
+  "files_modified": [
+    "src/main.ts",
+    "README.md"
+  ],
+  "requirements": [
+    "REQ-01"
+  ],
+  "tasks": [
+    {
+      "name": "Task 1: create the initial working slice",
+      "files": "src/main.ts",
+      "action": "Implement the smallest runnable slice that satisfies the requirement.",
+      "verify": "Run the smallest focused check for the slice.",
+      "done": "The slice works and is observable."
+    },
+    {
+      "name": "Task 2: document the slice",
+      "files": "README.md",
+      "action": "Document what was added and how to run it.",
+      "verify": "Read the README section and confirm it matches reality.",
+      "done": "The setup and outcome are documented."
+    }
+  ]
+}

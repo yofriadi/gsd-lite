@@ -1,0 +1,17 @@
+{
+  "plan": 1,
+  "title": "01-01 Bootstrap working slice summary",
+  "one_line": "Shipped the initial working slice and documented how to run it.",
+  "accomplishments": [
+    "Built the first working slice for the phase.",
+    "Documented the slice and its usage."
+  ],
+  "decisions": [
+    "Kept the implementation intentionally small for the first slice."
+  ],
+  "deviations": [],
+  "issues": [],
+  "requirements_completed": [
+    "REQ-01"
+  ]
+}
