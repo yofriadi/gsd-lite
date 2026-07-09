@@ -180,6 +180,7 @@ function makeBundle(
     state: {
       pointer:
         options.statePointer === undefined ? planId : options.statePointer,
+      next: null,
       plans: statePlans,
     },
   });
@@ -689,6 +690,11 @@ test('toolFinalizePlan: writes phase artifacts, living docs, planned state, and 
       parseStateDoc(await readFile(join(dir, 'docs', 'STATE.md'), 'utf8')),
       {
         pointer: '01-01',
+        next: {
+          command: '/build',
+          planId: '01-01',
+          reason: 'planned-but-unbuilt',
+        },
         plans: [{ id: '01-01', phase: '01', status: 'planned' }],
       },
     );

@@ -26,9 +26,14 @@ function fencedJson(value: unknown): string {
   return ['```json', JSON.stringify(value, null, 2), '```'].join('\n');
 }
 
-test('STATE: populated ledger round-trips through serialize/parse', () => {
+test('STATE: populated ledger with next action round-trips through serialize/parse', () => {
   const ledger: StateLedger = {
     pointer: '02-01',
+    next: {
+      command: '/build',
+      planId: '02-01',
+      reason: 'planned-but-unbuilt',
+    },
     plans: [
       { id: '01-01', phase: '01', status: 'built' },
       { id: '02-01', phase: '02', status: 'pending' },
@@ -39,10 +44,21 @@ test('STATE: populated ledger round-trips through serialize/parse', () => {
   assert.deepStrictEqual(parseStateDoc(serializeStateBlock(ledger)), ledger);
 });
 
-test('STATE: empty ledger accepts null pointer and round-trips', () => {
-  const ledger: StateLedger = { pointer: null, plans: [] };
+test('STATE: empty ledger accepts null pointer and null next action', () => {
+  const ledger: StateLedger = { pointer: null, next: null, plans: [] };
 
   assert.deepStrictEqual(parseStateDoc(serializeStateBlock(ledger)), ledger);
+});
+
+test('STATE: absent next defaults to null for older bundles', () => {
+  assert.deepStrictEqual(
+    parseStateDoc(fencedJson({ pointer: null, plans: [] })),
+    {
+      pointer: null,
+      next: null,
+      plans: [],
+    },
+  );
 });
 
 test('STATE: rejects empty-string pointer and invalid status', () => {
@@ -58,6 +74,36 @@ test('STATE: rejects empty-string pointer and invalid status', () => {
           plans: [{ id: '01-01', phase: '01', status: 'done' }],
         }),
       ),
+    ParseError,
+  );
+});
+
+test('STATE: rejects malformed next action', () => {
+  assert.throws(
+    () =>
+      parseStateDoc(
+        fencedJson({
+          pointer: null,
+          next: { command: 123, planId: '01-01', reason: 'bad' },
+          plans: [],
+        }),
+      ),
+    ParseError,
+  );
+  assert.throws(
+    () =>
+      parseStateDoc(
+        fencedJson({
+          pointer: null,
+          next: { command: '', planId: '01-01', reason: 'x' },
+          plans: [],
+        }),
+      ),
+    ParseError,
+  );
+  assert.throws(
+    () =>
+      parseStateDoc(fencedJson({ pointer: null, next: '/build', plans: [] })),
     ParseError,
   );
 });
@@ -350,6 +396,7 @@ test('allocatePlanId: allocates sequential ids for existing and new phases', () 
 test('templates: machine-readable templates are structurally valid', async () => {
   assert.deepStrictEqual(parseStateDoc(await readTemplate('STATE')), {
     pointer: null,
+    next: null,
     plans: [],
   });
   assert.deepStrictEqual(parseRoadmapDoc(await readTemplate('ROADMAP')), {

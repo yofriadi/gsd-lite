@@ -918,7 +918,14 @@ export function toolFinalizePlan(pi: PlanningToolAPI): ToolDefinition {
       );
       const stateMarkdown = replaceJsonBlock(
         await readTemplate('STATE'),
-        serializeStateBlock(bundle.state),
+        serializeStateBlock({
+          ...bundle.state,
+          next: {
+            command: '/build',
+            planId: bundle.plan.id,
+            reason: 'planned-but-unbuilt',
+          },
+        }),
       );
 
       await atomicWriteAll([

@@ -133,12 +133,27 @@ export interface StatePlan {
 }
 
 /**
+ * The next action a cold-started session should run, rendered from the status
+ * ledger + execution-context status. Not a durable buffer: finalize tools
+ * recompute it on every STATE write.
+ */
+export interface StateNext {
+  /** Command to run next, e.g. '/build' or '/plan'. */
+  command: string;
+  /** Plan id the command targets, or null when not plan-scoped. */
+  planId: string | null;
+  /** Human-readable reason, e.g. 'planned-but-unbuilt'. */
+  reason: string;
+}
+
+/**
  * STATE.md machine block: a per-plan status ledger plus the current pointer.
  * `pointer` is the id of the plan `/build` resolves by default (or null when
  * nothing is pending). It is a ledger, not a single linear cursor.
  */
 export interface StateLedger {
   pointer: string | null;
+  next: StateNext | null;
   plans: StatePlan[];
 }
 

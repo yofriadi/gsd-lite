@@ -27,6 +27,7 @@ import type {
   RoadmapDoc,
   RoadmapPhase,
   StateLedger,
+  StateNext,
   StatePlan,
   VerifyEvidence,
 } from './types.js';
@@ -133,6 +134,42 @@ function requirePlanStatus(value: unknown, entryType: string): PlanStatus {
   return value as PlanStatus;
 }
 
+function parseStateNext(value: unknown): StateNext | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) {
+    throw new ParseError('state.next must be an object or null', 'state');
+  }
+
+  const command = value.command;
+  if (typeof command !== 'string' || command.length === 0) {
+    throw new ParseError(
+      'state.next.command must be a non-empty string',
+      'state',
+    );
+  }
+
+  const planId = value.planId;
+  if (planId !== null && planId !== undefined && typeof planId !== 'string') {
+    throw new ParseError('state.next.planId must be a string or null', 'state');
+  }
+  if (typeof planId === 'string' && planId.length === 0) {
+    throw new ParseError(
+      'state.next.planId must be null, not an empty string',
+      'state',
+    );
+  }
+
+  const reason = value.reason;
+  if (typeof reason !== 'string' || reason.length === 0) {
+    throw new ParseError(
+      'state.next.reason must be a non-empty string',
+      'state',
+    );
+  }
+
+  return { command, planId: planId ?? null, reason };
+}
+
 export function parseStateDoc(text: string): StateLedger {
   const obj = parseDocObject(text, 'state');
   const pointerRaw = obj.pointer;
@@ -145,6 +182,7 @@ export function parseStateDoc(text: string): StateLedger {
       'state',
     );
   }
+  const next = parseStateNext(obj.next);
   const plans: StatePlan[] = requireArray(obj, 'plans', 'state').map((p, i) => {
     if (!isRecord(p)) {
       throw new ParseError(`state.plans[${i}] must be an object`, 'state');
@@ -155,12 +193,20 @@ export function parseStateDoc(text: string): StateLedger {
       status: requirePlanStatus(p.status, `state.plans[${i}]`),
     };
   });
-  return { pointer: pointerRaw ?? null, plans };
+  return { pointer: pointerRaw ?? null, next, plans };
 }
 
 export function serializeStateBlock(ledger: StateLedger): string {
   return fencedJson({
     pointer: ledger.pointer,
+    next:
+      ledger.next === null
+        ? null
+        : {
+            command: ledger.next.command,
+            planId: ledger.next.planId,
+            reason: ledger.next.reason,
+          },
     plans: ledger.plans.map((p) => ({
       id: p.id,
       phase: p.phase,

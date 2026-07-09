@@ -49,6 +49,7 @@ const roadmap: RoadmapDoc = {
 };
 const state: StateLedger = {
   pointer: '01-01',
+  next: null,
   plans: [{ id: '01-01', phase: '01', status: 'planned' }],
 };
 
