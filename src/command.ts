@@ -1,5 +1,5 @@
 /**
- * `/gsd-plan [problem]` command.
+ * `/plan [problem]` command.
  *
  * Starts an interview-driven planning session in the current session. The
  * planner uses synchronous `pi-subagents` delegation for focused exploration,
@@ -22,14 +22,14 @@ type PlanAPI = Pick<
   'getActiveTools' | 'sendUserMessage' | 'setActiveTools'
 >;
 
-export function cmdGsdPlan(pi: PlanAPI) {
+export function cmdPlan(pi: PlanAPI) {
   return {
     description:
       'Start an interview-driven planning conversation that uses synchronous foreground subagents and writes PLANS.md after review passes.',
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       if (!pi.getActiveTools().includes('subagent')) {
         ctx.ui.notify(
-          'gsd-plan requires the subagent tool from @gotgenes/pi-subagents. Enable that extension and retry.',
+          'plan requires the subagent tool from @gotgenes/pi-subagents. Enable that extension and retry.',
           'error',
         );
         return;
@@ -38,7 +38,7 @@ export function cmdGsdPlan(pi: PlanAPI) {
       const topic = args.trim();
       if (!topic) {
         ctx.ui.notify(
-          'Please specify a planning topic. E.g., /gsd-plan implement auth',
+          'Please specify a planning topic. E.g., /plan implement auth',
           'warning',
         );
         return;

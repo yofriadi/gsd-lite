@@ -336,7 +336,7 @@ function fingerprintEquals(
 }
 
 /**
- * Best-effort cleanup of `.gsd-lite/candidate-plans/` after a successful
+ * Best-effort cleanup of `.gpd/candidate-plans/` after a successful
  * finalize. The persisted review cycle already holds the exact plan bytes
  * via `candidatePlan`, so nothing is lost; this just prevents the directory
  * from accumulating one file per review cycle. We remove every entry
@@ -351,7 +351,7 @@ function fingerprintEquals(
  * true })` and the swallow-on-error semantics still apply.
  */
 async function clearStoredCandidatePlans(cwd: string): Promise<void> {
-  const dir = join(cwd, '.gsd-lite', 'candidate-plans');
+  const dir = join(cwd, '.gpd', 'candidate-plans');
   let entries: string[];
   try {
     entries = await readdir(dir);
@@ -717,10 +717,10 @@ export function toolStoreCandidatePlan(pi: PlanningToolAPI): ToolDefinition {
       const plan = String(params.plan);
       const id = newCandidatePlanId();
       const iteration = nextPlanReviewIteration(ctx.sessionManager);
-      const relPath = join('.gsd-lite', 'candidate-plans', `${id}.md`);
+      const relPath = join('.gpd', 'candidate-plans', `${id}.md`);
       const absPath = join(ctx.cwd, relPath);
 
-      await mkdir(join(ctx.cwd, '.gsd-lite', 'candidate-plans'), {
+      await mkdir(join(ctx.cwd, '.gpd', 'candidate-plans'), {
         recursive: true,
       });
       await writeFile(absPath, plan, 'utf8');

@@ -50,7 +50,7 @@ function storedPlanEntry(
     data: {
       id,
       iteration,
-      path: `.gsd-lite/candidate-plans/${id}.md`,
+      path: `.gpd/candidate-plans/${id}.md`,
       plan,
     },
   };
@@ -165,7 +165,7 @@ test('toolValidatePlan: parse failure stores failed cycle', async () => {
   if (!cycle.ok) {
     assert.strictEqual(cycle.status, 'parse');
   }
-  assert.ok(firstText(result).includes('gsd-review-result'));
+  assert.ok(firstText(result).includes('review-result'));
 });
 
 test('toolValidatePlan: non-completed status stores failed cycle', async () => {
@@ -563,7 +563,7 @@ test('toolValidatePlan: parse failure on planningContext does not persist review
   );
 
   assert.strictEqual(appended.length, 0);
-  assert.ok(firstText(result).includes('gsd-planning-context'));
+  assert.ok(firstText(result).includes('planning-context'));
   assert.ok(
     'details' in result && (result.details as { ok: boolean }).ok === false,
   );
@@ -1130,11 +1130,11 @@ test('toolStoreCandidatePlan: iterates with the review cycle counter', async () 
   }
 });
 
-test('toolFinalizePlan: clears .gsd-lite/candidate-plans/ on successful finalize', async () => {
+test('toolFinalizePlan: clears .gpd/candidate-plans/ on successful finalize', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-cleanup-'));
   try {
     // Pre-populate the candidate-plans directory with two stale files.
-    const planDir = join(dir, '.gsd-lite', 'candidate-plans');
+    const planDir = join(dir, '.gpd', 'candidate-plans');
     const { mkdir: mkdirFs, writeFile: writeFileFs } =
       await import('node:fs/promises');
     await mkdirFs(planDir, { recursive: true });
@@ -1195,12 +1195,12 @@ test('toolFinalizePlan: clears .gsd-lite/candidate-plans/ on successful finalize
   }
 });
 
-test('toolFinalizePlan: does not clean up .gsd-lite/candidate-plans/ when finalize fails', async () => {
+test('toolFinalizePlan: does not clean up .gpd/candidate-plans/ when finalize fails', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-no-cleanup-'));
   try {
     const { mkdir: mkdirFs, writeFile: writeFileFs } =
       await import('node:fs/promises');
-    const planDir = join(dir, '.gsd-lite', 'candidate-plans');
+    const planDir = join(dir, '.gpd', 'candidate-plans');
     await mkdirFs(planDir, { recursive: true });
     await writeFileFs(join(planDir, 'keep-me.md'), '# keep', 'utf8');
 

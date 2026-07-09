@@ -13,7 +13,7 @@ Pi-based planning workflow with a hard-gated review/finalization loop.
 
 Current repo status:
 
-- `/gsd-plan` starts an interview-driven planning session
+- `/plan` starts an interview-driven planning session
 - planning uses synchronous `subagent` calls for repo exploration, GitHub research, and `plan-reviewer`
 - `validate-plan` persists each review cycle before finalization
 - `finalize-plan` is the only path that writes `PLANS.md`

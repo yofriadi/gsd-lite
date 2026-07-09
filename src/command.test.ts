@@ -1,5 +1,5 @@
 /**
- * Tests for the /gsd-plan command: it enables the planning/subagent tool
+ * Tests for the /plan command: it enables the planning/subagent tool
  * surface, avoids duplicate grilling prompt injection, and references
  * custom subagents in the starter prompt.
  */
@@ -10,11 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import {
-  buildStarterPrompt,
-  cmdGsdPlan,
-  planningToolNames,
-} from './command.js';
+import { buildStarterPrompt, cmdPlan, planningToolNames } from './command.js';
 
 test('buildStarterPrompt: does not prepend duplicate grilling skill text', async () => {
   const prompt = await buildStarterPrompt('solve the thing');
@@ -32,8 +28,8 @@ test('buildStarterPrompt: encodes the loop-integrity improvements', async () => 
   assert.ok(prompt.includes('candidatePlanId'));
   assert.ok(prompt.includes('Single source of truth'));
   assert.ok(prompt.includes('reviewReadFingerprint'));
-  // cleanup of .gsd-lite/candidate-plans/
-  assert.ok(prompt.includes('removes `.gsd-lite/candidate-plans/`'));
+  // cleanup of .gpd/candidate-plans/
+  assert.ok(prompt.includes('removes `.gpd/candidate-plans/`'));
   // #7 failed-cycle recovery
   assert.ok(prompt.includes('Recovery on parse'));
   assert.ok(prompt.includes('rerun `plan-reviewer` once'));
@@ -81,13 +77,13 @@ test('planningToolNames: enables hard-gated planning tools only', () => {
   assert.ok(!planningToolNames().includes('bash'));
 });
 
-test('cmdGsdPlan: enables planning tools and sends starter prompt', async () => {
+test('cmdPlan: enables planning tools and sends starter prompt', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gsd-cmd-'));
   let tools: string[] = [];
   let sent = '';
   let notified: { message: string; level: string } | null = null;
   try {
-    const cmd = cmdGsdPlan({
+    const cmd = cmdPlan({
       getActiveTools: () => ['read', 'subagent'],
       setActiveTools: (names) => {
         tools = names;
@@ -117,11 +113,11 @@ test('cmdGsdPlan: enables planning tools and sends starter prompt', async () => 
   }
 });
 
-test('cmdGsdPlan: trims the problem text before prompting', async () => {
+test('cmdPlan: trims the problem text before prompting', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gsd-cmd-'));
   let sent = '';
   try {
-    const cmd = cmdGsdPlan({
+    const cmd = cmdPlan({
       getActiveTools: () => ['read', 'subagent'],
       setActiveTools: () => {},
       sendUserMessage: (message) => {
@@ -140,12 +136,12 @@ test('cmdGsdPlan: trims the problem text before prompting', async () => {
   }
 });
 
-test('cmdGsdPlan: refuses to start without subagent tool', async () => {
+test('cmdPlan: refuses to start without subagent tool', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gsd-cmd-'));
   let notified: { message: string; level: string } | null = null;
   let sent = false;
   try {
-    const cmd = cmdGsdPlan({
+    const cmd = cmdPlan({
       getActiveTools: () => ['read'],
       setActiveTools: () => {
         throw new Error('should not set tools when subagent is unavailable');
@@ -167,7 +163,7 @@ test('cmdGsdPlan: refuses to start without subagent tool', async () => {
     assert.strictEqual(sent, false);
     assert.deepStrictEqual(notified, {
       message:
-        'gsd-plan requires the subagent tool from @gotgenes/pi-subagents. Enable that extension and retry.',
+        'plan requires the subagent tool from @gotgenes/pi-subagents. Enable that extension and retry.',
       level: 'error',
     });
   } finally {

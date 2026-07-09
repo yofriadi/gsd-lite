@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines how the `gsd` planner should behave.
+This document defines how the planner should behave.
 
 It is a deeper behavioral/design spec.
 It complements the runtime contract and the runtime prompts.
@@ -30,8 +30,8 @@ The planner exists to help determine:
 
 ## Public meaning
 
-- `gsd plan` = help me figure out how to do this work well enough to produce a credible plan
-- `gsd plan recheck` = challenge the draft and force weak spots into the open
+- `plan` = help me figure out how to do this work well enough to produce a credible plan
+- `plan recheck` = challenge the draft and force weak spots into the open
 
 ## Product principles
 

@@ -34,6 +34,21 @@ subagent({
 
 Before asking the user a high-value question, first use `codebase-explorer` to ground the question in repo evidence. If the repo already answers the question, do not ask it. Ask one question at a time and only when the answer changes the implementation shape. Do not ask what a sensible default already answers; pick the default, note the choice in the planning context, and continue.
 
+### Ground against the project's own setup (anti-greenfield)
+
+Before drafting any plan, detect and read the project's authoritative setup/config/build files for whatever stack this repo actually uses — e.g. `package.json`/`tsconfig.json`/lint configs for Node, `pyproject.toml`/`setup.cfg` for Python, `Cargo.toml` for Rust, `go.mod` for Go — plus `README`, `AGENTS.md`, and any existing `docs/`. Treat these as ground truth: plans must extend and respect the existing toolchain, conventions, and structure rather than assume a greenfield project. Record the relevant facts in `repoFindings`. Do NOT hardcode a single language's file list — read what this repo actually has.
+
+### Known-unknowns triage
+
+While grounding and grilling, keep a running list of **known-unknowns**: things the plan's shape depends on but that are not yet settled (including **external dependencies** — libraries, services, or APIs the plan will rely on). This list is a transient working scratchpad, NOT a field of the pinned planning context. Before you finalize the planning context, drain every known-unknown by triaging each one into exactly one destination:
+
+- **Ask the user** — when it changes the implementation shape and no default is safe (grill it, one question at a time).
+- **Research via `doc-lookup`** — when it is an external API/spec/version fact.
+- **Inspect via `codebase-explorer`** — when the repo can answer it.
+- **Defer** — when it is genuinely open; record it in `deferredItems`.
+
+Resolved known-unknowns land in `repoFindings` or `assumptions`; external dependencies the plan commits to become `constraints` or `assumptions`. Nothing should remain merely "unknown" by the time the planning context is pinned at iteration 1 — otherwise the context-drift guard will fight you when you resolve it in a later cycle.
+
 ## Planning context
 
 Maintain a single planning context from the interview and repo exploration. It is the contract against which the plan and reviewer will be judged. It must contain:
@@ -80,7 +95,7 @@ Do not hand-write or reformat review JSON yourself. Only pass through the raw `p
 
 ### Single source of truth: store, then reference
 
-The planner, the reviewer, and the validator must all act on the **same bytes** of the candidate plan. Every review cycle starts with a single `store-candidate-plan` call that writes the plan to `<cwd>/.gsd-lite/candidate-plans/<id>.md` and persists the id. The reviewer `read`s the file at the returned path; `validate-plan` looks the id back up. There is no inline-plan path: an LLM cannot be trusted to re-type the same markdown verbatim into two places, so the API no longer lets it try.
+The planner, the reviewer, and the validator must all act on the **same bytes** of the candidate plan. Every review cycle starts with a single `store-candidate-plan` call that writes the plan to `<cwd>/.gpd/candidate-plans/<id>.md` and persists the id. The reviewer `read`s the file at the returned path; `validate-plan` looks the id back up. There is no inline-plan path: an LLM cannot be trusted to re-type the same markdown verbatim into two places, so the API no longer lets it try.
 
 ```text
 store-candidate-plan({ plan: "<candidate plan markdown>" })
@@ -99,13 +114,15 @@ validate-plan({
 
 When you revise the plan to address blockers or warnings, call `store-candidate-plan` again to get a fresh id; do not reuse the old id with a different plan. Each cycle has its own stored artifact.
 
+**Revise in place, do not regenerate.** When revising, edit the *prior* stored candidate bundle to address the specific reviewer critique (blockers/warnings) and leave unrelated sections intact. Do not regenerate the CONTEXT+PLAN+deltas bundle from scratch. The context-drift pin and `reviewReadFingerprint` guard the pinned planning-context JSON and prove the reviewer read the stored bytes, but they do not stop a from-scratch rewrite while the context JSON stays byte-identical — so keeping the diff surgical is a convention you must hold. Then re-store the revised bundle for a fresh id.
+
 ### Verifying the reviewer read the right file
 
 Trusting the reviewer to read the file at the path you gave it is a strong convention, not a proof. To make it mechanical, ask the reviewer to include a `reviewReadFingerprint` in its JSON output: `{firstLine, lastLine}` of the plan text it read — both being the first and last non-empty trimmed lines — computed the same way `validate-plan` will recompute it from the stored plan. `validate-plan` recomputes the fingerprint and refuses the cycle as a `parse` failure if the values disagree, so the persisted cycle can only describe a plan the reviewer provably read. The fingerprint catches the "reviewer was passed a different path" failure mode; it does not catch the reviewer `read`ing the file but scoring something else. The planner still has to pass the correct path.
 
 Deliberately absent: `lineCount`. Counting raw lines is exactly the off-by-one (trailing newline, blank lines) an LLM is likely to get slightly wrong, and a false-positive mismatch costs a full re-review cycle. If a stronger middle-document anchor is needed later (surgical middle-only edits), add a known sentinel line rather than a fragile line index.
 
-On a successful `finalize-plan`, the runtime removes `.gsd-lite/candidate-plans/` entirely, so no junk is ever left behind. `store-candidate-plan` recreates the directory on the next invocation. On finalize failure the files are retained so you can inspect what the reviewer actually saw.
+On a successful `finalize-plan`, the runtime removes `.gpd/candidate-plans/` entirely, so no junk is ever left behind. `store-candidate-plan` recreates the directory on the next invocation. On finalize failure the files are retained so you can inspect what the reviewer actually saw.
 
 ### Recovery on parse / aborted / stopped / error cycles
 

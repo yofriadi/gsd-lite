@@ -46,13 +46,13 @@ export function parseJsonObject(
 }
 
 export function parseReviewResult(text: string): GsdReviewResult {
-  const obj = parseJsonObject(text, 'gsd-review-result');
+  const obj = parseJsonObject(text, 'review-result');
   return {
-    blockers: requireReviewEntryArray(obj, 'blockers', 'gsd-review-result'),
-    warnings: requireReviewEntryArray(obj, 'warnings', 'gsd-review-result'),
-    nitpicks: requireReviewEntryArray(obj, 'nitpicks', 'gsd-review-result'),
-    summary: requireString(obj, 'summary', 'gsd-review-result'),
-    ...requireReadFingerprint(obj, 'gsd-review-result'),
+    blockers: requireReviewEntryArray(obj, 'blockers', 'review-result'),
+    warnings: requireReviewEntryArray(obj, 'warnings', 'review-result'),
+    nitpicks: requireReviewEntryArray(obj, 'nitpicks', 'review-result'),
+    summary: requireString(obj, 'summary', 'review-result'),
+    ...requireReadFingerprint(obj, 'review-result'),
   };
 }
 
@@ -89,22 +89,14 @@ function requireReadFingerprint(
 }
 
 export function parsePlanningContext(text: string): PlanningContext {
-  const obj = parseJsonObject(text, 'gsd-planning-context');
+  const obj = parseJsonObject(text, 'planning-context');
   return {
-    objective: requireString(obj, 'objective', 'gsd-planning-context'),
-    constraints: requireStringArray(obj, 'constraints', 'gsd-planning-context'),
-    nonGoals: requireStringArray(obj, 'nonGoals', 'gsd-planning-context'),
-    assumptions: requireStringArray(obj, 'assumptions', 'gsd-planning-context'),
-    deferredItems: requireStringArray(
-      obj,
-      'deferredItems',
-      'gsd-planning-context',
-    ),
-    repoFindings: requireStringArray(
-      obj,
-      'repoFindings',
-      'gsd-planning-context',
-    ),
+    objective: requireString(obj, 'objective', 'planning-context'),
+    constraints: requireStringArray(obj, 'constraints', 'planning-context'),
+    nonGoals: requireStringArray(obj, 'nonGoals', 'planning-context'),
+    assumptions: requireStringArray(obj, 'assumptions', 'planning-context'),
+    deferredItems: requireStringArray(obj, 'deferredItems', 'planning-context'),
+    repoFindings: requireStringArray(obj, 'repoFindings', 'planning-context'),
   };
 }
 
