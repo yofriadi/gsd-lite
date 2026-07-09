@@ -1,6 +1,13 @@
-import { writeFile, mkdir, readdir, rmdir, unlink } from 'node:fs/promises';
+import {
+  writeFile,
+  mkdir,
+  readdir,
+  rmdir,
+  unlink,
+  rename,
+} from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   defineTool,
@@ -11,11 +18,19 @@ import {
 import { Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 
+import { parsePlanBundle } from './bundle.js';
+import {
+  serializeRequirementsBlock,
+  serializeRoadmapBlock,
+  serializeStateBlock,
+} from './doc-parse.js';
+import { renderContextSections } from './doc-render.js';
 import {
   ParseError,
   parsePlanningContext,
   parseReviewResult,
 } from './parse.js';
+import { readTemplate } from './templates.js';
 import {
   ENTRY,
   type GsdPlanFinalized,
@@ -364,6 +379,134 @@ async function clearStoredCandidatePlans(cwd: string): Promise<void> {
   await rmdir(dir).catch(() => {});
 }
 
+/**
+ * Write a set of docs as atomically as the filesystem allows: stage every
+ * target as a sibling temp file first, and only once ALL content is written
+ * commit them with `rename()`. A content-write failure unlinks every staged
+ * temp and throws before any target is touched, so a failed expansion can
+ * never leave a half-written SET of docs (the per-file torn-write guarantee
+ * of temp+rename, extended across the multi-doc finalize).
+ *
+ * This is not fully transactional across the rename loop itself — rename is an
+ * atomic metadata op, so the residual window (a crash BETWEEN two renames) is
+ * far smaller than the previous write-then-rename-per-file ordering, but a
+ * crash there could still leave some docs committed and others not. Full
+ * cross-file transactionality would need a journal we deliberately do not
+ * build (sequential single-writer model).
+ */
+async function atomicWriteAll(
+  entries: ReadonlyArray<{ path: string; content: string }>,
+): Promise<void> {
+  const staged: Array<{ tmp: string; path: string }> = [];
+  try {
+    for (const { path, content } of entries) {
+      const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(tmp, content, 'utf8');
+      staged.push({ tmp, path });
+    }
+  } catch (err) {
+    await Promise.all(staged.map((s) => unlink(s.tmp).catch(() => {})));
+    throw err;
+  }
+  // All content is staged; commit with renames.
+  for (const { tmp, path } of staged) {
+    await rename(tmp, path);
+  }
+}
+
+function ensureTrailingNewline(text: string): string {
+  return text.endsWith('\n') ? text : `${text}\n`;
+}
+
+function slug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/** A phase id is exactly `NN` (two or more digits). */
+function isValidPhaseId(id: string): boolean {
+  return /^\d{2,}$/.test(id);
+}
+
+/** A plan id is exactly `NN-MM` (two or more digits, dash, two or more digits). */
+function isValidPlanId(id: string): boolean {
+  return /^\d{2,}-\d{2,}$/.test(id);
+}
+
+function replaceJsonBlock(templateText: string, newBlock: string): string {
+  const replaced = templateText.replace(/```json[\s\S]*?```/, newBlock);
+  return ensureTrailingNewline(replaced);
+}
+
+function reqIdSet(bundle: ReturnType<typeof parsePlanBundle>): Set<string> {
+  return new Set(bundle.requirements.requirements.map((r) => r.id));
+}
+
+function unresolvedReqIds(
+  bundle: ReturnType<typeof parsePlanBundle>,
+): string[] {
+  const validReqIds = reqIdSet(bundle);
+  const referenced = new Set<string>(bundle.plan.reqIds);
+  for (const slice of bundle.plan.slices) {
+    for (const reqId of slice.reqIds) referenced.add(reqId);
+  }
+  return [...referenced].filter((reqId) => !validReqIds.has(reqId));
+}
+
+function sliceReqIdsNotClaimed(
+  bundle: ReturnType<typeof parsePlanBundle>,
+): string[] {
+  const claimed = new Set(bundle.plan.reqIds);
+  const missing = new Set<string>();
+  for (const slice of bundle.plan.slices) {
+    for (const reqId of slice.reqIds) {
+      if (!claimed.has(reqId)) missing.add(reqId);
+    }
+  }
+  return [...missing];
+}
+
+function uncoveredClaimedReqIds(
+  bundle: ReturnType<typeof parsePlanBundle>,
+): string[] {
+  if (bundle.plan.reqIds.length === 0) return [];
+  const covered = new Set<string>();
+  for (const slice of bundle.plan.slices) {
+    for (const reqId of slice.reqIds) covered.add(reqId);
+  }
+  return bundle.plan.reqIds.filter((reqId) => !covered.has(reqId));
+}
+
+function badRoadmapReqRefs(
+  bundle: ReturnType<typeof parsePlanBundle>,
+): string[] {
+  const validReqIds = reqIdSet(bundle);
+  const bad = new Set<string>();
+  for (const phase of bundle.roadmap.phases) {
+    for (const reqId of phase.reqIds) {
+      if (!validReqIds.has(reqId)) bad.add(reqId);
+    }
+  }
+  return [...bad];
+}
+
+function statePointerIsValid(
+  bundle: ReturnType<typeof parsePlanBundle>,
+): boolean {
+  if (bundle.state.pointer === null) return true;
+  return bundle.state.plans.some((plan) => plan.id === bundle.state.pointer);
+}
+
+function planIsPlanned(bundle: ReturnType<typeof parsePlanBundle>): boolean {
+  return bundle.state.plans.some(
+    (plan) => plan.id === bundle.plan.id && plan.status === 'planned',
+  );
+}
+
 function summarizeReview(review: GsdReviewResult): string {
   const head = [
     `blockers=${review.blockers.length}`,
@@ -431,14 +574,14 @@ export function toolValidatePlan(pi: PlanningToolAPI): ToolDefinition {
     name: 'validate-plan',
     label: 'Validate Plan',
     description:
-      'Resolve a stored candidate plan by id, parse plan-reviewer subagent output, persist the latest hard-gated review cycle, and summarize whether another revision is required. This tool does not review the plan itself.',
+      'Resolve a stored candidate plan bundle by id, parse plan-reviewer subagent output, persist the latest hard-gated review cycle, and summarize whether another revision is required. This tool does not review the bundle itself.',
     promptSnippet:
-      'After the plan-reviewer subagent reviews the candidate plan, pass its full output into validate-plan with the candidatePlanId returned by store-candidate-plan.',
+      'After the plan-reviewer subagent reviews the candidate plan bundle, pass its full output into validate-plan with the candidatePlanId returned by store-candidate-plan.',
     promptGuidelines: [
-      'Always store the candidate plan first via store-candidate-plan, then call the plan-reviewer subagent with the returned path, then call validate-plan with the same candidatePlanId.',
+      'Always store the candidate plan bundle first via store-candidate-plan, then call the plan-reviewer subagent with the returned path, then call validate-plan with the same candidatePlanId.',
       'This tool only parses and persists that review result; it does not perform the review itself.',
       'If the review subagent failed or was aborted, set reviewStatus so the failed cycle is persisted instead of silently dropping it.',
-      'The stored plan is the single source of truth: the reviewer reads it from disk, and validate-plan persists the exact same bytes. Never re-pass the plan as inline text.',
+      'The stored plan bundle is the single source of truth: the reviewer reads it from disk, and validate-plan persists the exact same bytes. Never re-pass the bundle as inline text.',
       'Pin the planningContext at the first review cycle. If a later cycle re-supplies a planningContext whose objective/constraints/nonGoals/assumptions/deferredItems/repoFindings differ from iteration 1, the tool will refuse unless contextDriftAcknowledged is set.',
       'Only finalize when the latest persisted review cycle is clean.',
       'Pass the planningContext as a JSON string containing objective, constraints, nonGoals, assumptions, deferredItems, and repoFindings.',
@@ -594,33 +737,34 @@ export function toolFinalizePlan(pi: PlanningToolAPI): ToolDefinition {
     name: 'finalize-plan',
     label: 'Finalize Plan',
     description:
-      'Write PLANS.md only when the latest persisted review cycle has no blockers, a planning context was captured, and the markdown matches the reviewed candidate plan. Warnings must be zero or explicitly accepted via acceptWarnings.',
+      'Expand a reviewed plan bundle into phase CONTEXT/PLAN artifacts and the REQUIREMENTS/ROADMAP/STATE living docs only when the latest persisted review cycle has no blockers, a planning context was captured, and the markdown matches the reviewed candidate bundle. Warnings must be zero or explicitly accepted via acceptWarnings.',
     promptSnippet:
-      'Call finalize-plan only after the latest validate-plan result has no blockers and a planning context was captured. Pass acceptWarnings: true only when the user has explicitly accepted the remaining warnings.',
+      'Call finalize-plan only after the latest validate-plan result has no blockers and a planning context was captured. Pass the exact reviewed plan bundle markdown. Pass acceptWarnings: true only when the user has explicitly accepted the remaining warnings.',
     promptGuidelines: [
-      'Pass the exact final markdown you want written to PLANS.md.',
-      'Do not call this if you changed the candidate plan after the latest clean review; rerun validate-plan first.',
+      'Pass the exact final plan bundle markdown: the PLAN section plus complete REQUIREMENTS/ROADMAP/STATE json sections delimited by the gpd section markers.',
+      'Do not call this if you changed the candidate bundle after the latest clean review; rerun validate-plan first.',
       'Set acceptWarnings: true only when the user has explicitly chosen to accept the remaining warnings; blockers can never be accepted.',
-      'Ensure validate-plan was called with a planningContext so the review can be traced back to the objective and constraints.',
+      'Ensure validate-plan was called with a planningContext so the rendered CONTEXT artifact can be traced back to the objective and constraints.',
+      'This tool writes docs/phases/NN-name/NN-CONTEXT.md, docs/phases/NN-name/NN-MM-PLAN.md, and docs/REQUIREMENTS.md, docs/ROADMAP.md, docs/STATE.md. It does not write PLANS.md.',
     ],
     parameters: Type.Object({
       markdown: Type.String(),
       acceptWarnings: Type.Optional(Type.Boolean()),
     }),
     renderCall() {
-      return new Text('PLANS.md', 0, 0);
+      return new Text('phase artifacts + living docs', 0, 0);
     },
     async execute(_id, params, _signal, _onUpdate, ctx: ExtensionContext) {
       const latest = latestPlanReviewCycle(ctx.sessionManager);
       if (!latest) {
         return simpleResult(
-          'Cannot finalize PLANS.md: no persisted validate-plan result exists yet.',
+          'Cannot finalize plan bundle: no persisted validate-plan result exists yet.',
           { ok: false, reason: 'no-review' },
         );
       }
       if (!latest.ok) {
         return simpleResult(
-          `Cannot finalize PLANS.md: latest review cycle failed (${latest.status}). Rerun validate-plan after fixing the issue.`,
+          `Cannot finalize plan bundle: latest review cycle failed (${latest.status}). Rerun validate-plan after fixing the issue.`,
           { ok: false, reason: latest.status },
         );
       }
@@ -628,7 +772,7 @@ export function toolFinalizePlan(pi: PlanningToolAPI): ToolDefinition {
       const context = latestPlanningContext(ctx.sessionManager);
       if (!context || context.iteration !== latest.iteration) {
         return simpleResult(
-          'Cannot finalize PLANS.md: no planning context was captured for the latest review cycle. Call validate-plan with a planningContext first.',
+          'Cannot finalize plan bundle: no planning context was captured for the latest review cycle. Call validate-plan with a planningContext first.',
           { ok: false, reason: 'no-planning-context' },
         );
       }
@@ -636,14 +780,14 @@ export function toolFinalizePlan(pi: PlanningToolAPI): ToolDefinition {
       const acceptWarnings = params.acceptWarnings === true;
       if (latest.review.blockers.length > 0) {
         return simpleResult(
-          'Cannot finalize PLANS.md: latest review cycle still has blockers. Blockers can never be accepted; revise the plan and rerun validate-plan.',
+          'Cannot finalize plan bundle: latest review cycle still has blockers. Blockers can never be accepted; revise the bundle and rerun validate-plan.',
           { ok: false, reason: latest.status, review: latest.review },
         );
       }
       const warningCount = latest.review.warnings.length;
       if (warningCount > 0 && !acceptWarnings) {
         return simpleResult(
-          `Cannot finalize PLANS.md: latest review cycle has ${warningCount} warning(s) but no blockers. Either revise to address them and rerun validate-plan, or set acceptWarnings: true to explicitly accept them.`,
+          `Cannot finalize plan bundle: latest review cycle has ${warningCount} warning(s) but no blockers. Either revise to address them and rerun validate-plan, or set acceptWarnings: true to explicitly accept them.`,
           { ok: false, reason: latest.status, review: latest.review },
         );
       }
@@ -651,26 +795,164 @@ export function toolFinalizePlan(pi: PlanningToolAPI): ToolDefinition {
       const markdown = params.markdown as string;
       if (normalizePlan(markdown) !== normalizePlan(latest.candidatePlan)) {
         return simpleResult(
-          'Cannot finalize PLANS.md: markdown differs from the latest clean reviewed candidate plan. Rerun validate-plan on the updated plan first.',
+          'Cannot finalize plan bundle: markdown differs from the latest clean reviewed candidate bundle. Rerun validate-plan on the updated bundle first.',
           { ok: false, reason: 'stale-review' },
         );
       }
 
-      await writeFile(join(ctx.cwd, 'PLANS.md'), markdown, 'utf8');
+      let bundle: ReturnType<typeof parsePlanBundle>;
+      try {
+        bundle = parsePlanBundle(markdown);
+      } catch (error) {
+        const message =
+          error instanceof ParseError
+            ? error.message
+            : 'Failed to parse plan bundle.';
+        return simpleResult(`Cannot finalize plan bundle: ${message}`, {
+          ok: false,
+          reason: 'bundle-parse',
+        });
+      }
+
+      const unresolved = unresolvedReqIds(bundle);
+      if (unresolved.length > 0) {
+        return simpleResult(
+          `Cannot finalize plan bundle: unresolved requirement id(s): ${unresolved.join(', ')}.`,
+          { ok: false, reason: 'unresolved-req', reqIds: unresolved },
+        );
+      }
+
+      const unclaimed = sliceReqIdsNotClaimed(bundle);
+      if (unclaimed.length > 0) {
+        return simpleResult(
+          `Cannot finalize plan bundle: slice requirement id(s) are not claimed by the plan metadata: ${unclaimed.join(', ')}.`,
+          { ok: false, reason: 'slice-req-not-claimed', reqIds: unclaimed },
+        );
+      }
+
+      const uncovered = uncoveredClaimedReqIds(bundle);
+      if (uncovered.length > 0) {
+        return simpleResult(
+          `Cannot finalize plan bundle: claimed requirement id(s) have no covering slice: ${uncovered.join(', ')}.`,
+          { ok: false, reason: 'reverse-coverage', reqIds: uncovered },
+        );
+      }
+
+      const badRoadmapRefs = badRoadmapReqRefs(bundle);
+      if (badRoadmapRefs.length > 0) {
+        return simpleResult(
+          `Cannot finalize plan bundle: roadmap references unknown requirement id(s): ${badRoadmapRefs.join(', ')}.`,
+          { ok: false, reason: 'bad-roadmap-ref', reqIds: badRoadmapRefs },
+        );
+      }
+
+      if (!statePointerIsValid(bundle)) {
+        return simpleResult(
+          `Cannot finalize plan bundle: state pointer ${bundle.state.pointer} does not reference a known plan.`,
+          {
+            ok: false,
+            reason: 'bad-state-pointer',
+            pointer: bundle.state.pointer,
+          },
+        );
+      }
+
+      if (!planIsPlanned(bundle)) {
+        return simpleResult(
+          `Cannot finalize plan bundle: state does not mark ${bundle.plan.id} as planned.`,
+          { ok: false, reason: 'plan-not-planned', planId: bundle.plan.id },
+        );
+      }
+
+      // Guard the model-authored ids that flow into filesystem paths: a
+      // malformed or traversal id (`../..`, absolute, slashes) must never
+      // resolve a write target outside docs/phases/. Validate BEFORE any
+      // path is constructed so a bad id fails closed with zero writes.
+      if (!isValidPlanId(bundle.plan.id)) {
+        return simpleResult(
+          `Cannot finalize plan bundle: plan id ${JSON.stringify(bundle.plan.id)} is not a valid NN-MM id.`,
+          { ok: false, reason: 'bad-plan-id', planId: bundle.plan.id },
+        );
+      }
+      if (!isValidPhaseId(bundle.plan.phase)) {
+        return simpleResult(
+          `Cannot finalize plan bundle: plan phase ${JSON.stringify(bundle.plan.phase)} is not a valid NN phase id.`,
+          { ok: false, reason: 'bad-phase-id', phase: bundle.plan.phase },
+        );
+      }
+
+      const phase = bundle.roadmap.phases.find(
+        (candidate) => candidate.id === bundle.plan.phase,
+      );
+      if (!phase) {
+        return simpleResult(
+          `Cannot finalize plan bundle: unknown roadmap phase ${bundle.plan.phase}.`,
+          { ok: false, reason: 'unknown-phase', phase: bundle.plan.phase },
+        );
+      }
+      if (!isValidPhaseId(phase.id)) {
+        return simpleResult(
+          `Cannot finalize plan bundle: roadmap phase id ${JSON.stringify(phase.id)} is not a valid NN phase id.`,
+          { ok: false, reason: 'bad-phase-id', phase: phase.id },
+        );
+      }
+
+      const phaseDir = `docs/phases/${phase.id}-${slug(phase.name)}`;
+      const paths = [
+        `${phaseDir}/${phase.id}-CONTEXT.md`,
+        `${phaseDir}/${bundle.plan.id}-PLAN.md`,
+        'docs/REQUIREMENTS.md',
+        'docs/ROADMAP.md',
+        'docs/STATE.md',
+      ];
+      const contextMarkdown = ensureTrailingNewline(
+        `# Phase ${phase.id}: ${phase.name}\n\n${renderContextSections(context)}`,
+      );
+      const requirementsMarkdown = replaceJsonBlock(
+        await readTemplate('REQUIREMENTS'),
+        serializeRequirementsBlock(bundle.requirements),
+      );
+      const roadmapMarkdown = replaceJsonBlock(
+        await readTemplate('ROADMAP'),
+        serializeRoadmapBlock(bundle.roadmap),
+      );
+      const stateMarkdown = replaceJsonBlock(
+        await readTemplate('STATE'),
+        serializeStateBlock(bundle.state),
+      );
+
+      await atomicWriteAll([
+        { path: join(ctx.cwd, paths[0] ?? ''), content: contextMarkdown },
+        {
+          path: join(ctx.cwd, paths[1] ?? ''),
+          content: ensureTrailingNewline(bundle.planMarkdown),
+        },
+        {
+          path: join(ctx.cwd, 'docs', 'REQUIREMENTS.md'),
+          content: requirementsMarkdown,
+        },
+        { path: join(ctx.cwd, 'docs', 'ROADMAP.md'), content: roadmapMarkdown },
+        { path: join(ctx.cwd, 'docs', 'STATE.md'), content: stateMarkdown },
+      ]);
       await clearStoredCandidatePlans(ctx.cwd);
+
       const finalized: GsdPlanFinalized = {
         iteration: latest.iteration,
-        path: 'PLANS.md',
+        planId: bundle.plan.id,
+        paths,
         ...(warningCount > 0 ? { acceptedWarnings: warningCount } : {}),
       };
       pi.appendEntry(ENTRY.planFinalized, finalized);
-      return simpleResult(
+      const warningText =
         warningCount > 0
-          ? `PLANS.md written (${warningCount} warning(s) explicitly accepted).`
-          : 'PLANS.md written.',
+          ? ` (${warningCount} warning(s) explicitly accepted)`
+          : '';
+      return simpleResult(
+        `Finalized plan ${bundle.plan.id}: wrote ${paths.join(', ')}${warningText}.`,
         {
           ok: true,
-          path: 'PLANS.md',
+          planId: bundle.plan.id,
+          paths,
           iteration: latest.iteration,
           acceptedWarnings: warningCount,
         },
@@ -698,14 +980,14 @@ export function toolStoreCandidatePlan(pi: PlanningToolAPI): ToolDefinition {
     name: 'store-candidate-plan',
     label: 'Store Candidate Plan',
     description:
-      'Write a candidate plan to disk, persist a session entry that resolves its id to the stored bytes, and return the id and path. Always call this once per review cycle before invoking plan-reviewer and validate-plan.',
+      'Write a candidate plan bundle to disk, persist a session entry that resolves its id to the stored bytes, and return the id and path. Always call this once per review cycle before invoking plan-reviewer and validate-plan.',
     promptSnippet:
-      'Call this before plan-reviewer and validate-plan to store the candidate plan; pass the returned candidatePlanId to validate-plan and the returned path to plan-reviewer so it can read the file directly.',
+      'Call this before plan-reviewer and validate-plan to store the candidate plan bundle; pass the returned candidatePlanId to validate-plan and the returned path to plan-reviewer so it can read the file directly.',
     promptGuidelines: [
       'Call once per review cycle, before invoking plan-reviewer and validate-plan.',
-      'Pass the exact same plan string you intend to ship to the reviewer; the stored bytes are what the reviewer scores and what validate-plan persists.',
-      'When revising the plan, call store-candidate-plan again to get a fresh id; do not reuse an old id with a different plan.',
-      'When the review returns blockers or warnings, you must re-store the plan even if the markdown did not change, so each cycle has its own stored artifact.',
+      'Pass the exact same plan bundle string you intend to ship to the reviewer; the stored bytes are what the reviewer scores and what validate-plan persists.',
+      'When revising the bundle, call store-candidate-plan again to get a fresh id; do not reuse an old id with different markdown.',
+      'When the review returns blockers or warnings, you must re-store the bundle even if the markdown did not change, so each cycle has its own stored artifact.',
     ],
     parameters: Type.Object({
       plan: Type.String(),

@@ -2,6 +2,7 @@
 {
   "id": "NN-MM",
   "phase": "NN",
+  "reqIds": ["REQ-01"],
   "verify": "npm run verify"
 }
 ```
@@ -9,7 +10,7 @@
 # Plan NN-MM
 
 <!-- Phase plan artifact. Written by /plan after review. The top json block
-     declares plan metadata; slice headings and bullet blocks below are
+     declares plan metadata including plan-level reqIds; slice headings and bullet blocks below are
      machine-parsed by /build. Keep parseable fields structurally valid. -->
 
 ## Out of Scope

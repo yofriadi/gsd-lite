@@ -50,7 +50,7 @@ Required inputs:
 4. `assumptions` — assumptions the plan is built on.
 5. `deferredItems` — open questions or deferred decisions.
 6. `repoFindings` — relevant repository evidence discovered before planning.
-7. `candidatePlan` — the markdown plan to review.
+7. `candidatePlan` — the markdown plan **bundle** (PLAN + REQUIREMENTS/ROADMAP/STATE delta sections) to review.
 
 ## Review rubric
 
@@ -64,6 +64,8 @@ Review the candidate plan only against the provided context. Do not broaden scop
 - **Verification quality** — are verification steps concrete and observable?
 - **Coverage gaps** — are any obvious required tasks missing?
 - **Requirement coverage (bidirectional, within plan scope)** — *when the plan enumerates slices with covered requirement (REQ) ids:* every REQ id the plan **claims** must be covered by at least one slice, and every slice must trace to a REQ id the plan claims. Scope this strictly to the REQ ids this plan claims (plus any phase allocation it states) — do NOT flag the plan for failing to cover REQ ids that the roadmap assigns to other plans or phases. A claimed REQ with no slice, or a slice with no claimed REQ, is a blocker. Beyond the structural mapping, judge whether each slice actually *satisfies* the REQ it claims rather than merely referencing it. When the plan has no REQ ids, skip this check.
+- **Slice interface** — each slice's `#### Consumes` must resolve to an earlier slice's `#### Produces` within the same plan; an unresolved Consumes is a blocker. Slices with no cross-slice dependency use an empty/`_none_` block, not a missing block.
+- **Anti-placeholder** — the finalized CONTEXT/PLAN and the REQUIREMENTS/ROADMAP/STATE delta sections must contain no unresolved placeholder (`TODO`/`TBD`/`FIXME`/`???`) and no internal contradiction; any unresolved placeholder or contradiction is a blocker.
 - **Scope sizing** — should any part be split or reordered?
 
 ## Output contract

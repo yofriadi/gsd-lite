@@ -1,9 +1,15 @@
 import assert from 'node:assert';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { serializePlanBundle } from './bundle.js';
+import {
+  parseRequirementsDoc,
+  parseRoadmapDoc,
+  parseStateDoc,
+} from './doc-parse.js';
 import {
   planFingerprint,
   toolFinalizePlan,
@@ -16,27 +22,36 @@ import {
   type GsdPlanReviewCycle,
   type GsdReviewResult,
   type GsdStoredCandidatePlan,
+  type Requirement,
+  type RoadmapPhase,
+  type StatePlan,
 } from './types.js';
+
+const TEST_PLAN_ID = 'plan-test-id';
 
 function reviewJson(review: GsdReviewResult): string {
   return ['```json', JSON.stringify(review, null, 2), '```'].join('\n');
 }
 
-function planningContextJson(): string {
-  return JSON.stringify({
+function planningContext() {
+  return {
     objective: 'build the thing',
     constraints: ['use TypeScript'],
     nonGoals: ['rewrite the world'],
     assumptions: ['pi SDK available'],
     deferredItems: ['execution order'],
     repoFindings: ['uses node:test'],
-  });
+  };
+}
+
+function planningContextJson(): string {
+  return JSON.stringify(planningContext());
 }
 
 function contextEntry(iteration = 1) {
   return {
     customType: ENTRY.planningContext,
-    data: { iteration, ...JSON.parse(planningContextJson()) },
+    data: { iteration, ...planningContext() },
   };
 }
 
@@ -55,8 +70,6 @@ function storedPlanEntry(
     },
   };
 }
-
-const TEST_PLAN_ID = 'plan-test-id';
 
 function firstText(result: {
   content: Array<{ type: string; text?: string }>;
@@ -81,12 +94,147 @@ function branchSessionWithPlan(
   return branchSession([storedPlanEntry(id, plan), ...extraEntries]);
 }
 
+function fencedJson(value: unknown): string {
+  return ['```json', JSON.stringify(value, null, 2), '```'].join('\n');
+}
+
+function makePlanMarkdown(
+  options: {
+    planId?: string;
+    phase?: string;
+    reqIds?: string[];
+    sliceReqIds?: string[];
+  } = {},
+): string {
+  const planId = options.planId ?? '01-01';
+  const phase = options.phase ?? '01';
+  const reqIds = options.reqIds ?? ['REQ-01'];
+  const sliceReqIds = options.sliceReqIds ?? reqIds;
+  const suffix = sliceReqIds.length > 0 ? ` [${sliceReqIds.join(', ')}]` : '';
+  return [
+    fencedJson({
+      id: planId,
+      phase,
+      reqIds,
+      verify: 'npm run verify',
+    }),
+    '',
+    `# Plan ${planId}`,
+    '',
+    '## Out of Scope',
+    '',
+    '- docs/generated/**',
+    '',
+    `### Slice 1: Implement scoped work${suffix}`,
+    '',
+    '#### Consumes',
+    '',
+    '_none_',
+    '',
+    '#### Produces',
+    '',
+    '- src/example.ts',
+  ].join('\n');
+}
+
+function makeBundle(
+  options: {
+    planId?: string;
+    phase?: string;
+    phaseName?: string;
+    reqIds?: string[];
+    sliceReqIds?: string[];
+    requirements?: Requirement[];
+    phaseReqIds?: string[];
+    statePointer?: string | null;
+    statePlans?: StatePlan[];
+    roadmapPhases?: RoadmapPhase[];
+  } = {},
+): string {
+  const planId = options.planId ?? '01-01';
+  const phase = options.phase ?? '01';
+  const reqIds = options.reqIds ?? ['REQ-01'];
+  const requirements = options.requirements ?? [
+    { id: 'REQ-01', text: 'Implement scoped work.' },
+  ];
+  const roadmapPhases = options.roadmapPhases ?? [
+    {
+      id: phase,
+      name: options.phaseName ?? 'Planning Artifacts',
+      reqIds: options.phaseReqIds ?? reqIds,
+      plans: [planId],
+    },
+  ];
+  const statePlans = options.statePlans ?? [
+    { id: planId, phase, status: 'planned' },
+  ];
+  return serializePlanBundle({
+    planMarkdown: makePlanMarkdown({
+      planId,
+      phase,
+      reqIds,
+      sliceReqIds: options.sliceReqIds,
+    }),
+    requirements: { requirements },
+    roadmap: { phases: roadmapPhases },
+    state: {
+      pointer:
+        options.statePointer === undefined ? planId : options.statePointer,
+      plans: statePlans,
+    },
+  });
+}
+
+function cleanCycle(
+  bundle: string,
+  options: {
+    iteration?: number;
+    blockers?: GsdReviewResult['blockers'];
+    warnings?: GsdReviewResult['warnings'];
+  } = {},
+): GsdPlanReviewCycle {
+  const blockers = options.blockers ?? [];
+  const warnings = options.warnings ?? [];
+  const review: GsdReviewResult = {
+    blockers,
+    warnings,
+    nitpicks: [],
+    summary: 'ready',
+  };
+  return {
+    iteration: options.iteration ?? 1,
+    ok: true,
+    candidatePlan: bundle,
+    raw: reviewJson(review),
+    review,
+    status:
+      blockers.length > 0 || warnings.length > 0 ? 'needs-revision' : 'clean',
+  };
+}
+
+function cleanBundleSession(bundle: string, iteration = 1) {
+  return branchSession([
+    {
+      customType: ENTRY.planReviewCycle,
+      data: cleanCycle(bundle, { iteration }),
+    },
+    contextEntry(iteration),
+  ]);
+}
+
+async function assertPathMissing(path: string): Promise<void> {
+  await assert.rejects(
+    () => stat(path),
+    (err: NodeJS.ErrnoException) => err.code === 'ENOENT',
+  );
+}
+
 test('toolValidatePlan: metadata says plan-reviewer does review work', () => {
   const tool = toolValidatePlan({
     appendEntry: () => {},
   });
 
-  assert.ok(tool.description?.includes('does not review the plan itself'));
+  assert.ok(tool.description?.includes('does not review the bundle itself'));
   assert.ok(tool.promptSnippet?.includes('plan-reviewer subagent'));
   assert.ok(
     tool.promptGuidelines?.some((line) =>
@@ -118,7 +266,7 @@ test('toolValidatePlan: parses clean plan-reviewer output and stores cycle', asy
     undefined,
     {
       cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('Candidate plan body'),
+      sessionManager: branchSessionWithPlan('Candidate bundle body'),
     } as never,
   );
 
@@ -129,9 +277,7 @@ test('toolValidatePlan: parses clean plan-reviewer output and stores cycle', asy
   assert.strictEqual(cycle.ok, true);
   if (cycle.ok) {
     assert.strictEqual(cycle.status, 'clean');
-    assert.strictEqual(cycle.candidatePlan, 'Candidate plan body');
-    assert.deepStrictEqual(cycle.review.blockers, []);
-    assert.deepStrictEqual(cycle.review.warnings, []);
+    assert.strictEqual(cycle.candidatePlan, 'Candidate bundle body');
   }
   assert.ok(firstText(result).includes('blockers=0'));
 });
@@ -154,506 +300,15 @@ test('toolValidatePlan: parse failure stores failed cycle', async () => {
     undefined,
     {
       cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('Candidate plan body'),
+      sessionManager: branchSessionWithPlan('Candidate bundle body'),
     } as never,
   );
 
   assert.strictEqual(appended.length, 2);
-  assert.strictEqual(appended[0]?.customType, ENTRY.planningContext);
   const cycle = appended[1]?.data as GsdPlanReviewCycle;
   assert.strictEqual(cycle.ok, false);
-  if (!cycle.ok) {
-    assert.strictEqual(cycle.status, 'parse');
-  }
+  if (!cycle.ok) assert.strictEqual(cycle.status, 'parse');
   assert.ok(firstText(result).includes('review-result'));
-});
-
-test('toolValidatePlan: non-completed status stores failed cycle', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const tool = toolValidatePlan({
-    appendEntry: (customType, data) => {
-      appended.push({ customType, data });
-    },
-  });
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: planningContextJson(),
-      reviewOutput: 'plan-reviewer aborted upstream',
-      reviewStatus: 'aborted',
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('Candidate plan body'),
-    } as never,
-  );
-
-  assert.strictEqual(appended.length, 2);
-  assert.strictEqual(appended[0]?.customType, ENTRY.planningContext);
-  const cycle = appended[1]?.data as GsdPlanReviewCycle;
-  assert.strictEqual(cycle.ok, false);
-  if (!cycle.ok) {
-    assert.strictEqual(cycle.status, 'aborted');
-    assert.strictEqual(cycle.message, 'plan-reviewer aborted upstream');
-  }
-  assert.ok(firstText(result).includes('aborted'));
-});
-
-test('toolFinalizePlan: refuses without clean review', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const tool = toolFinalizePlan({
-      appendEntry: (customType, data) => {
-        appended.push({ customType, data });
-      },
-    });
-    const result = await tool.execute(
-      '1',
-      { markdown: '# Plan' },
-      undefined,
-      undefined,
-      { cwd: dir, sessionManager: branchSession() } as never,
-    );
-
-    assert.strictEqual(appended.length, 0);
-    assert.ok(firstText(result).includes('no persisted validate-plan'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolFinalizePlan: writes PLANS.md only for matching clean review', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const reviewedPlan = '# Plan\n- step 1';
-    const tool = toolFinalizePlan({
-      appendEntry: (customType, data) => {
-        appended.push({ customType, data });
-      },
-    });
-    const result = await tool.execute(
-      '1',
-      { markdown: reviewedPlan },
-      undefined,
-      undefined,
-      {
-        cwd: dir,
-        sessionManager: branchSession([
-          contextEntry(2),
-          {
-            customType: ENTRY.planReviewCycle,
-            data: {
-              iteration: 2,
-              ok: true,
-              candidatePlan: reviewedPlan,
-              raw: reviewJson({
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              }),
-              review: {
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              },
-              status: 'clean',
-            } satisfies GsdPlanReviewCycle,
-          },
-        ]),
-      } as never,
-    );
-
-    const disk = await readFile(join(dir, 'PLANS.md'), 'utf8');
-    assert.strictEqual(disk, reviewedPlan);
-    assert.strictEqual(appended.length, 1);
-    assert.strictEqual(appended[0]?.customType, ENTRY.planFinalized);
-    assert.ok(firstText(result).includes('PLANS.md written'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolFinalizePlan: rejects stale markdown after clean review', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const tool = toolFinalizePlan({
-      appendEntry: () => {},
-    });
-    const result = await tool.execute(
-      '1',
-      { markdown: '# Changed plan' },
-      undefined,
-      undefined,
-      {
-        cwd: dir,
-        sessionManager: branchSession([
-          contextEntry(),
-          {
-            customType: ENTRY.planReviewCycle,
-            data: {
-              iteration: 1,
-              ok: true,
-              candidatePlan: '# Original plan',
-              raw: reviewJson({
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              }),
-              review: {
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              },
-              status: 'clean',
-            } satisfies GsdPlanReviewCycle,
-          },
-        ]),
-      } as never,
-    );
-
-    assert.ok(firstText(result).includes('markdown differs'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolValidatePlan: round-trips ReviewEntry with issue and fix', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const tool = toolValidatePlan({
-    appendEntry: (customType, data) => {
-      appended.push({ customType, data });
-    },
-  });
-  await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: planningContextJson(),
-      reviewOutput: reviewJson({
-        blockers: [
-          {
-            issue: 'no refresh strategy',
-            fix: 'specify token TTL and refresh path',
-          },
-        ],
-        warnings: [{ issue: 'license unclear' }],
-        nitpicks: [{ issue: 'rename foo' }],
-        summary: 'one blocker, one warning',
-      }),
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
-    } as never,
-  );
-
-  assert.strictEqual(appended.length, 2);
-  assert.strictEqual(appended[0]?.customType, ENTRY.planningContext);
-  const cycle = appended[1]?.data as GsdPlanReviewCycle;
-  assert.ok(cycle.ok);
-  if (cycle.ok) {
-    assert.strictEqual(cycle.status, 'needs-revision');
-    assert.deepStrictEqual(cycle.review.blockers, [
-      {
-        issue: 'no refresh strategy',
-        fix: 'specify token TTL and refresh path',
-      },
-    ]);
-    assert.deepStrictEqual(cycle.review.warnings, [
-      { issue: 'license unclear' },
-    ]);
-    assert.deepStrictEqual(cycle.review.nitpicks, [{ issue: 'rename foo' }]);
-  }
-});
-
-test('toolFinalizePlan: refuses when warnings exist without acceptWarnings', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const reviewedPlan = '# Plan';
-    const tool = toolFinalizePlan({ appendEntry: () => {} });
-    const result = await tool.execute(
-      '1',
-      { markdown: reviewedPlan },
-      undefined,
-      undefined,
-      {
-        cwd: dir,
-        sessionManager: branchSession([
-          contextEntry(),
-          {
-            customType: ENTRY.planReviewCycle,
-            data: {
-              iteration: 1,
-              ok: true,
-              candidatePlan: reviewedPlan,
-              raw: reviewJson({
-                blockers: [],
-                warnings: [{ issue: 'license unclear' }],
-                nitpicks: [],
-                summary: 'one warning',
-              }),
-              review: {
-                blockers: [],
-                warnings: [{ issue: 'license unclear' }],
-                nitpicks: [],
-                summary: 'one warning',
-              },
-              status: 'needs-revision',
-            } satisfies GsdPlanReviewCycle,
-          },
-        ]),
-      } as never,
-    );
-
-    assert.ok(firstText(result).includes('1 warning(s)'));
-    assert.ok(firstText(result).includes('acceptWarnings'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolFinalizePlan: accepts warnings when acceptWarnings is true', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const reviewedPlan = '# Plan';
-    const tool = toolFinalizePlan({
-      appendEntry: (customType, data) => {
-        appended.push({ customType, data });
-      },
-    });
-    const result = await tool.execute(
-      '1',
-      { markdown: reviewedPlan, acceptWarnings: true },
-      undefined,
-      undefined,
-      {
-        cwd: dir,
-        sessionManager: branchSession([
-          {
-            customType: ENTRY.planReviewCycle,
-            data: {
-              iteration: 1,
-              ok: true,
-              candidatePlan: reviewedPlan,
-              raw: reviewJson({
-                blockers: [],
-                warnings: [{ issue: 'license unclear' }, { issue: 'wording' }],
-                nitpicks: [],
-                summary: 'two warnings',
-              }),
-              review: {
-                blockers: [],
-                warnings: [{ issue: 'license unclear' }, { issue: 'wording' }],
-                nitpicks: [],
-                summary: 'two warnings',
-              },
-              status: 'needs-revision',
-            } satisfies GsdPlanReviewCycle,
-          },
-          contextEntry(),
-        ]),
-      } as never,
-    );
-
-    const disk = await readFile(join(dir, 'PLANS.md'), 'utf8');
-    assert.strictEqual(disk, reviewedPlan);
-    assert.strictEqual(appended.length, 1);
-    assert.strictEqual(appended[0]?.customType, ENTRY.planFinalized);
-    const finalized = appended[0]?.data as {
-      iteration: number;
-      path: 'PLANS.md';
-      acceptedWarnings?: number;
-    };
-    assert.strictEqual(finalized.acceptedWarnings, 2);
-    assert.ok(firstText(result).includes('2 warning(s)'));
-    assert.ok(firstText(result).includes('PLANS.md written'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolFinalizePlan: never accepts blockers even with acceptWarnings', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const reviewedPlan = '# Plan';
-    const tool = toolFinalizePlan({
-      appendEntry: (customType, data) => {
-        appended.push({ customType, data });
-      },
-    });
-    const result = await tool.execute(
-      '1',
-      { markdown: reviewedPlan, acceptWarnings: true },
-      undefined,
-      undefined,
-      {
-        cwd: dir,
-        sessionManager: branchSession([
-          {
-            customType: ENTRY.planReviewCycle,
-            data: {
-              iteration: 1,
-              ok: true,
-              candidatePlan: reviewedPlan,
-              raw: reviewJson({
-                blockers: [{ issue: 'missing verification' }],
-                warnings: [],
-                nitpicks: [],
-                summary: 'one blocker',
-              }),
-              review: {
-                blockers: [{ issue: 'missing verification' }],
-                warnings: [],
-                nitpicks: [],
-                summary: 'one blocker',
-              },
-              status: 'needs-revision',
-            } satisfies GsdPlanReviewCycle,
-          },
-          contextEntry(),
-        ]),
-      } as never,
-    );
-
-    assert.strictEqual(appended.length, 0);
-    assert.ok(firstText(result).includes('blockers'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolValidatePlan: parse failure on planningContext does not persist review cycle', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const tool = toolValidatePlan({
-    appendEntry: (customType, data) => {
-      appended.push({ customType, data });
-    },
-  });
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: 'not valid json',
-      reviewOutput: reviewJson({
-        blockers: [],
-        warnings: [],
-        nitpicks: [],
-        summary: 'ready',
-      }),
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
-    } as never,
-  );
-
-  assert.strictEqual(appended.length, 0);
-  assert.ok(firstText(result).includes('planning-context'));
-  assert.ok(
-    'details' in result && (result.details as { ok: boolean }).ok === false,
-  );
-});
-
-test('toolFinalizePlan: refuses when no planning context is captured', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const tool = toolFinalizePlan({ appendEntry: () => {} });
-    const result = await tool.execute(
-      '1',
-      { markdown: '# Plan' },
-      undefined,
-      undefined,
-      {
-        cwd: dir,
-        sessionManager: branchSession([
-          {
-            customType: ENTRY.planReviewCycle,
-            data: {
-              iteration: 1,
-              ok: true,
-              candidatePlan: '# Plan',
-              raw: reviewJson({
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              }),
-              review: {
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              },
-              status: 'clean',
-            } satisfies GsdPlanReviewCycle,
-          },
-        ]),
-      } as never,
-    );
-
-    assert.ok(firstText(result).includes('no planning context'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolFinalizePlan: refuses when planning context is stale', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
-  try {
-    const tool = toolFinalizePlan({ appendEntry: () => {} });
-    const result = await tool.execute(
-      '1',
-      { markdown: '# Plan v2' },
-      undefined,
-      undefined,
-      {
-        cwd: dir,
-        sessionManager: branchSession([
-          contextEntry(1),
-          {
-            customType: ENTRY.planReviewCycle,
-            data: {
-              iteration: 2,
-              ok: true,
-              candidatePlan: '# Plan v2',
-              raw: reviewJson({
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              }),
-              review: {
-                blockers: [],
-                warnings: [],
-                nitpicks: [],
-                summary: 'ready',
-              },
-              status: 'clean',
-            } satisfies GsdPlanReviewCycle,
-          },
-        ]),
-      } as never,
-    );
-
-    assert.ok(firstText(result).includes('latest review cycle'));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 });
 
 test('toolValidatePlan: refuses when planningContext drifts from pinned iteration 1', async () => {
@@ -663,7 +318,6 @@ test('toolValidatePlan: refuses when planningContext drifts from pinned iteratio
       appended.push({ customType, data });
     },
   });
-  // First call pins the context at iteration 1.
   await tool.execute(
     '1',
     {
@@ -680,13 +334,11 @@ test('toolValidatePlan: refuses when planningContext drifts from pinned iteratio
     undefined,
     {
       cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
+      sessionManager: branchSessionWithPlan('# Bundle'),
     } as never,
   );
-  // Second call re-supplies a context whose objective has narrowed. The
-  // session now has iteration-1's stored plan plus the appended context, so
-  // we extend it with an iteration-2 stored plan.
-  const drifted = JSON.parse(planningContextJson());
+
+  const drifted = planningContext();
   drifted.objective = 'build the thing but smaller';
   const result = await tool.execute(
     '2',
@@ -706,141 +358,19 @@ test('toolValidatePlan: refuses when planningContext drifts from pinned iteratio
       cwd: process.cwd(),
       sessionManager: branchSession([
         ...appended,
-        storedPlanEntry('plan-test-id-2', '# Plan v2', 2),
+        storedPlanEntry('plan-test-id-2', '# Bundle v2', 2),
       ]),
     } as never,
   );
 
   assert.ok(firstText(result).includes('diverges from the pinned'));
-  assert.ok(firstText(result).includes('contextDriftAcknowledged'));
-  assert.ok(
-    'details' in result && (result.details as { ok: boolean }).ok === false,
+  assert.strictEqual(
+    (result.details as { reason: string }).reason,
+    'context-drift',
   );
-  // No second review-cycle entry was persisted; only the iteration-1 cycle exists.
-  const cycles = appended.filter(
-    (entry) => entry.customType === ENTRY.planReviewCycle,
-  );
-  assert.strictEqual(cycles.length, 1);
-  // No second planning-context entry was persisted either.
-  const contexts = appended.filter(
-    (entry) => entry.customType === ENTRY.planningContext,
-  );
-  assert.strictEqual(contexts.length, 1);
 });
 
-test('toolValidatePlan: accepts drifted planningContext when contextDriftAcknowledged is set', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const tool = toolValidatePlan({
-    appendEntry: (customType, data) => {
-      appended.push({ customType, data });
-    },
-  });
-  await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: planningContextJson(),
-      reviewOutput: reviewJson({
-        blockers: [],
-        warnings: [],
-        nitpicks: [],
-        summary: 'ready',
-      }),
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
-    } as never,
-  );
-  const drifted = JSON.parse(planningContextJson());
-  drifted.objective = 'build the thing but smaller';
-  const result = await tool.execute(
-    '2',
-    {
-      candidatePlanId: 'plan-test-id-2',
-      planningContext: JSON.stringify(drifted),
-      reviewOutput: reviewJson({
-        blockers: [],
-        warnings: [],
-        nitpicks: [],
-        summary: 'ready',
-      }),
-      contextDriftAcknowledged: true,
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSession([
-        ...appended,
-        storedPlanEntry('plan-test-id-2', '# Plan v2', 2),
-      ]),
-    } as never,
-  );
-
-  assert.ok(firstText(result).includes('blockers=0'));
-  const cycles = appended.filter(
-    (entry) => entry.customType === ENTRY.planReviewCycle,
-  );
-  assert.strictEqual(cycles.length, 2);
-});
-
-test('toolValidatePlan: parse failure response includes recovery hint', async () => {
-  const tool = toolValidatePlan({ appendEntry: () => {} });
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: planningContextJson(),
-      reviewOutput: 'not json',
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
-    } as never,
-  );
-  assert.ok(firstText(result).includes('rerun plan-reviewer once'));
-});
-
-test('toolValidatePlan: aborted status response includes recovery hint', async () => {
-  const tool = toolValidatePlan({ appendEntry: () => {} });
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: planningContextJson(),
-      reviewOutput: 'plan-reviewer aborted upstream',
-      reviewStatus: 'aborted',
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
-    } as never,
-  );
-  assert.ok(firstText(result).includes('rerun plan-reviewer once'));
-});
-
-test('planFingerprint: returns first and last non-empty trimmed lines', () => {
-  const fp = planFingerprint('# Plan\n- step 1\n- step 2\n- step 3\n');
-  assert.deepStrictEqual(fp, {
-    firstLine: '# Plan',
-    lastLine: '- step 3',
-  });
-});
-
-test('planFingerprint: tolerates blank trailing lines and CRLF', () => {
-  const fp = planFingerprint('\r\n# Title\r\n\r\nbody\r\n\r\n');
-  assert.strictEqual(fp.firstLine, '# Title');
-  assert.strictEqual(fp.lastLine, 'body');
-});
-
-test('toolValidatePlan: persists failed cycle when reviewReadFingerprint does not match stored plan', async () => {
+test('toolValidatePlan: reviewReadFingerprint guards stored bytes', async () => {
   const appended: Array<{ customType: string; data: unknown }> = [];
   const tool = toolValidatePlan({
     appendEntry: (customType, data) => {
@@ -857,21 +387,14 @@ test('toolValidatePlan: persists failed cycle when reviewReadFingerprint does no
         warnings: [],
         nitpicks: [],
         summary: 'ready',
-        // Reviewer claims to have read a plan whose first/last non-empty
-        // lines are "## Other". The stored plan starts and ends with
-        // "# Plan". The fingerprint must mismatch and the cycle must be
-        // refused as parse.
-        reviewReadFingerprint: {
-          firstLine: '## Other',
-          lastLine: '## Other',
-        },
+        reviewReadFingerprint: { firstLine: 'other', lastLine: 'other' },
       }),
     },
     undefined,
     undefined,
     {
       cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
+      sessionManager: branchSessionWithPlan('# Bundle'),
     } as never,
   );
 
@@ -880,168 +403,14 @@ test('toolValidatePlan: persists failed cycle when reviewReadFingerprint does no
     (entry) => entry.customType === ENTRY.planReviewCycle,
   )?.data as GsdPlanReviewCycle;
   assert.strictEqual(cycle.ok, false);
-  if (!cycle.ok) {
-    assert.strictEqual(cycle.status, 'parse');
-  }
 });
 
-test('toolValidatePlan: accepts cycle when reviewReadFingerprint matches stored plan', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const tool = toolValidatePlan({
-    appendEntry: (customType, data) => {
-      appended.push({ customType, data });
-    },
-  });
-  const plan = '# Plan\n- step 1\n- step 2';
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: planningContextJson(),
-      reviewOutput: reviewJson({
-        blockers: [],
-        warnings: [],
-        nitpicks: [],
-        summary: 'ready',
-        reviewReadFingerprint: planFingerprint(plan),
-      }),
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan(plan),
-    } as never,
-  );
-
-  assert.ok(firstText(result).includes('blockers=0'));
-  const cycle = appended.find(
-    (entry) => entry.customType === ENTRY.planReviewCycle,
-  )?.data as GsdPlanReviewCycle;
-  assert.strictEqual(cycle.ok, true);
-  if (cycle.ok) {
-    assert.strictEqual(cycle.status, 'clean');
-    assert.deepStrictEqual(
-      cycle.review.reviewReadFingerprint,
-      planFingerprint(plan),
-    );
-  }
+test('planFingerprint: returns first and last non-empty trimmed lines', () => {
+  const fp = planFingerprint('\r\n# Plan\r\n\r\nbody\r\n\r\n');
+  assert.deepStrictEqual(fp, { firstLine: '# Plan', lastLine: 'body' });
 });
 
-test('toolValidatePlan: absent reviewReadFingerprint is accepted (graceful degradation)', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const tool = toolValidatePlan({
-    appendEntry: (customType, data) => {
-      appended.push({ customType, data });
-    },
-  });
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: TEST_PLAN_ID,
-      planningContext: planningContextJson(),
-      reviewOutput: reviewJson({
-        blockers: [],
-        warnings: [],
-        nitpicks: [],
-        summary: 'ready',
-      }),
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSessionWithPlan('# Plan'),
-    } as never,
-  );
-
-  assert.ok(firstText(result).includes('blockers=0'));
-  const cycle = appended.find(
-    (entry) => entry.customType === ENTRY.planReviewCycle,
-  )?.data as GsdPlanReviewCycle;
-  if (cycle.ok) {
-    assert.strictEqual(cycle.review.reviewReadFingerprint, undefined);
-  }
-});
-
-test('toolValidatePlan: refuses when candidatePlanId is unknown', async () => {
-  const tool = toolValidatePlan({ appendEntry: () => {} });
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: 'no-such-id',
-      planningContext: planningContextJson(),
-      reviewOutput: reviewJson({
-        blockers: [],
-        warnings: [],
-        nitpicks: [],
-        summary: 'ready',
-      }),
-    },
-    undefined,
-    undefined,
-    { cwd: process.cwd(), sessionManager: branchSession() } as never,
-  );
-  assert.ok(firstText(result).includes('no stored candidate plan'));
-  assert.ok(
-    'details' in result &&
-      (result.details as { reason: string }).reason ===
-        'unknown-candidate-plan-id',
-  );
-});
-
-test('toolValidatePlan: refuses when stored plan iteration mismatches current iteration', async () => {
-  const tool = toolValidatePlan({ appendEntry: () => {} });
-  const result = await tool.execute(
-    '1',
-    {
-      candidatePlanId: 'plan-test-id-3',
-      planningContext: planningContextJson(),
-      reviewOutput: reviewJson({
-        blockers: [],
-        warnings: [],
-        nitpicks: [],
-        summary: 'ready',
-      }),
-    },
-    undefined,
-    undefined,
-    {
-      cwd: process.cwd(),
-      sessionManager: branchSession([
-        {
-          customType: ENTRY.planReviewCycle,
-          data: {
-            iteration: 1,
-            ok: true,
-            candidatePlan: '# Prior',
-            raw: reviewJson({
-              blockers: [],
-              warnings: [],
-              nitpicks: [],
-              summary: 'ready',
-            }),
-            review: {
-              blockers: [],
-              warnings: [],
-              nitpicks: [],
-              summary: 'ready',
-            },
-            status: 'clean',
-          } satisfies GsdPlanReviewCycle,
-        },
-        storedPlanEntry('plan-test-id-3', '# Stale plan', 1),
-      ]),
-    } as never,
-  );
-  assert.ok(firstText(result).includes('prepared for iteration'));
-  assert.ok(
-    'details' in result &&
-      (result.details as { reason: string }).reason === 'iteration-mismatch',
-  );
-});
-
-test('toolStoreCandidatePlan: writes the plan file and persists a session entry', async () => {
+test('toolStoreCandidatePlan: writes the plan bundle file and persists a session entry', async () => {
   const appended: Array<{ customType: string; data: unknown }> = [];
   const dir = await mkdtemp(join(tmpdir(), 'gsd-store-'));
   try {
@@ -1050,170 +419,520 @@ test('toolStoreCandidatePlan: writes the plan file and persists a session entry'
         appended.push({ customType, data });
       },
     });
-    const plan = '# Stored plan\n- step 1\n- step 2';
-    const result = await tool.execute('1', { plan }, undefined, undefined, {
-      cwd: dir,
-      sessionManager: branchSession(),
-    } as never);
+    const bundle = makeBundle();
+    const result = await tool.execute(
+      '1',
+      { plan: bundle },
+      undefined,
+      undefined,
+      {
+        cwd: dir,
+        sessionManager: branchSession(),
+      } as never,
+    );
 
     assert.strictEqual(appended.length, 1);
     assert.strictEqual(appended[0]?.customType, ENTRY.storedCandidatePlan);
     const stored = appended[0]?.data as GsdStoredCandidatePlan;
-    assert.strictEqual(stored.iteration, 1);
-    assert.strictEqual(stored.plan, plan);
-    assert.ok(stored.id.length > 0);
-    assert.ok(stored.path.endsWith(`${stored.id}.md`));
-
-    const onDisk = await readFile(join(dir, stored.path), 'utf8');
-    assert.strictEqual(onDisk, plan);
-
-    const details = result.details as {
-      ok: boolean;
-      id: string;
-      path: string;
-      iteration: number;
-    };
-    assert.strictEqual(details.ok, true);
-    assert.strictEqual(details.id, stored.id);
-    assert.strictEqual(details.iteration, 1);
-    assert.ok(firstText(result).includes(stored.path));
+    assert.strictEqual(stored.plan, bundle);
+    assert.strictEqual(await readFile(join(dir, stored.path), 'utf8'), bundle);
+    assert.strictEqual((result.details as { ok: boolean }).ok, true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('toolStoreCandidatePlan: iterates with the review cycle counter', async () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-store-'));
+test('toolFinalizePlan: refuses without persisted review', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
   try {
-    const tool = toolStoreCandidatePlan({
-      appendEntry: (customType, data) => {
-        appended.push({ customType, data });
-      },
-    });
-    const session = branchSession([
-      {
-        customType: ENTRY.planReviewCycle,
-        data: {
-          iteration: 1,
-          ok: true,
-          candidatePlan: '# Prior',
-          raw: reviewJson({
-            blockers: [],
-            warnings: [],
-            nitpicks: [],
-            summary: 'ready',
-          }),
-          review: {
-            blockers: [],
-            warnings: [],
-            nitpicks: [],
-            summary: 'ready',
-          },
-          status: 'clean',
-        } satisfies GsdPlanReviewCycle,
-      },
-    ]);
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
     const result = await tool.execute(
       '1',
-      { plan: '# Plan v2' },
+      { markdown: makeBundle() },
       undefined,
       undefined,
-      { cwd: dir, sessionManager: session } as never,
+      { cwd: dir, sessionManager: branchSession() } as never,
     );
-    const stored = appended[0]?.data as GsdStoredCandidatePlan;
-    assert.strictEqual(stored.iteration, 2);
-    const details = result.details as { iteration: number };
-    assert.strictEqual(details.iteration, 2);
+
+    assert.strictEqual(
+      (result.details as { reason: string }).reason,
+      'no-review',
+    );
+    await assertPathMissing(join(dir, 'docs'));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('toolFinalizePlan: refuses failed latest cycle', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle },
+      undefined,
+      undefined,
+      {
+        cwd: dir,
+        sessionManager: branchSession([
+          {
+            customType: ENTRY.planReviewCycle,
+            data: {
+              iteration: 1,
+              ok: false,
+              candidatePlan: bundle,
+              raw: 'bad json',
+              status: 'parse',
+              message: 'parse failed',
+            } satisfies GsdPlanReviewCycle,
+          },
+          contextEntry(),
+        ]),
+      } as never,
+    );
+
+    assert.strictEqual((result.details as { reason: string }).reason, 'parse');
+    await assertPathMissing(join(dir, 'docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: refuses without planning context', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle },
+      undefined,
+      undefined,
+      {
+        cwd: dir,
+        sessionManager: branchSession([
+          { customType: ENTRY.planReviewCycle, data: cleanCycle(bundle) },
+        ]),
+      } as never,
+    );
+
+    assert.strictEqual(
+      (result.details as { reason: string }).reason,
+      'no-planning-context',
+    );
+    await assertPathMissing(join(dir, 'docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: refuses stale planning context iteration', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle },
+      undefined,
+      undefined,
+      {
+        cwd: dir,
+        sessionManager: branchSession([
+          contextEntry(1),
+          {
+            customType: ENTRY.planReviewCycle,
+            data: cleanCycle(bundle, { iteration: 2 }),
+          },
+        ]),
+      } as never,
+    );
+
+    assert.strictEqual(
+      (result.details as { reason: string }).reason,
+      'no-planning-context',
+    );
+    await assertPathMissing(join(dir, 'docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: blockers can never be accepted', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle, acceptWarnings: true },
+      undefined,
+      undefined,
+      {
+        cwd: dir,
+        sessionManager: branchSession([
+          {
+            customType: ENTRY.planReviewCycle,
+            data: cleanCycle(bundle, {
+              blockers: [{ issue: 'missing verification' }],
+            }),
+          },
+          contextEntry(),
+        ]),
+      } as never,
+    );
+
+    assert.ok(firstText(result).includes('blockers'));
+    await assertPathMissing(join(dir, 'docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: warnings require acceptWarnings', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle },
+      undefined,
+      undefined,
+      {
+        cwd: dir,
+        sessionManager: branchSession([
+          {
+            customType: ENTRY.planReviewCycle,
+            data: cleanCycle(bundle, {
+              warnings: [{ issue: 'license unclear' }],
+            }),
+          },
+          contextEntry(),
+        ]),
+      } as never,
+    );
+
+    assert.ok(firstText(result).includes('acceptWarnings'));
+    await assertPathMissing(join(dir, 'docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: rejects stale markdown after clean review', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: makeBundle({ phaseName: 'Changed' }) },
+      undefined,
+      undefined,
+      { cwd: dir, sessionManager: cleanBundleSession(bundle) } as never,
+    );
+
+    assert.strictEqual(
+      (result.details as { reason: string }).reason,
+      'stale-review',
+    );
+    await assertPathMissing(join(dir, 'docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: writes phase artifacts, living docs, planned state, and rendered context', async () => {
+  const appended: Array<{ customType: string; data: unknown }> = [];
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({
+      appendEntry: (customType, data) => appended.push({ customType, data }),
+    });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle },
+      undefined,
+      undefined,
+      { cwd: dir, sessionManager: cleanBundleSession(bundle) } as never,
+    );
+
+    assert.strictEqual((result.details as { ok: boolean }).ok, true);
+    const phaseDir = join(dir, 'docs', 'phases', '01-planning-artifacts');
+    const context = await readFile(join(phaseDir, '01-CONTEXT.md'), 'utf8');
+    assert.ok(context.includes('# Phase 01: Planning Artifacts'));
+    assert.ok(context.includes('## Findings\n\n- uses node:test'));
+    assert.ok(
+      context.includes('## Decisions\n\n- use TypeScript\n- pi SDK available'),
+    );
+    assert.ok(context.includes('## Deferred Unknowns\n\n- execution order'));
+
+    const plan = await readFile(join(phaseDir, '01-01-PLAN.md'), 'utf8');
+    assert.strictEqual(plan, makePlanMarkdown() + '\n');
+
+    assert.deepStrictEqual(
+      parseRequirementsDoc(
+        await readFile(join(dir, 'docs', 'REQUIREMENTS.md'), 'utf8'),
+      ),
+      { requirements: [{ id: 'REQ-01', text: 'Implement scoped work.' }] },
+    );
+    assert.deepStrictEqual(
+      parseRoadmapDoc(await readFile(join(dir, 'docs', 'ROADMAP.md'), 'utf8'))
+        .phases[0]?.plans,
+      ['01-01'],
+    );
+    assert.deepStrictEqual(
+      parseStateDoc(await readFile(join(dir, 'docs', 'STATE.md'), 'utf8')),
+      {
+        pointer: '01-01',
+        plans: [{ id: '01-01', phase: '01', status: 'planned' }],
+      },
+    );
+    assert.strictEqual(appended[0]?.customType, ENTRY.planFinalized);
+    const finalized = appended[0]?.data as GsdPlanFinalized;
+    assert.strictEqual(finalized.planId, '01-01');
+    assert.deepStrictEqual(finalized.paths, [
+      'docs/phases/01-planning-artifacts/01-CONTEXT.md',
+      'docs/phases/01-planning-artifacts/01-01-PLAN.md',
+      'docs/REQUIREMENTS.md',
+      'docs/ROADMAP.md',
+      'docs/STATE.md',
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: accepts warnings when acceptWarnings is true', async () => {
+  const appended: Array<{ customType: string; data: unknown }> = [];
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-'));
+  try {
+    const bundle = makeBundle();
+    const tool = toolFinalizePlan({
+      appendEntry: (customType, data) => appended.push({ customType, data }),
+    });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle, acceptWarnings: true },
+      undefined,
+      undefined,
+      {
+        cwd: dir,
+        sessionManager: branchSession([
+          {
+            customType: ENTRY.planReviewCycle,
+            data: cleanCycle(bundle, {
+              warnings: [{ issue: 'license unclear' }],
+            }),
+          },
+          contextEntry(),
+        ]),
+      } as never,
+    );
+
+    assert.strictEqual((result.details as { ok: boolean }).ok, true);
+    assert.strictEqual(
+      (appended[0]?.data as GsdPlanFinalized).acceptedWarnings,
+      1,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: fresh-repo bootstrap creates all docs', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-fresh-'));
+  try {
+    const bundle = makeBundle({ planId: '01-01' });
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    await tool.execute('1', { markdown: bundle }, undefined, undefined, {
+      cwd: dir,
+      sessionManager: cleanBundleSession(bundle),
+    } as never);
+
+    for (const rel of [
+      'docs/phases/01-planning-artifacts/01-CONTEXT.md',
+      'docs/phases/01-planning-artifacts/01-01-PLAN.md',
+      'docs/REQUIREMENTS.md',
+      'docs/ROADMAP.md',
+      'docs/STATE.md',
+    ]) {
+      await stat(join(dir, rel));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function assertFinalizeRefusal(
+  bundle: string,
+  expectedReason: string,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-refuse-'));
+  try {
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle },
+      undefined,
+      undefined,
+      { cwd: dir, sessionManager: cleanBundleSession(bundle) } as never,
+    );
+    assert.strictEqual(
+      (result.details as { reason: string }).reason,
+      expectedReason,
+    );
+    await assertPathMissing(join(dir, 'docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('toolFinalizePlan: refuses unresolved requirement ids', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({
+      reqIds: ['REQ-01', 'REQ-02'],
+      sliceReqIds: ['REQ-02'],
+      phaseReqIds: ['REQ-01'],
+    }),
+    'unresolved-req',
+  );
+});
+
+test('toolFinalizePlan: refuses slice req ids not claimed by plan metadata', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({
+      reqIds: ['REQ-01'],
+      sliceReqIds: ['REQ-02'],
+      requirements: [
+        { id: 'REQ-01', text: 'First requirement.' },
+        { id: 'REQ-02', text: 'Second requirement.' },
+      ],
+    }),
+    'slice-req-not-claimed',
+  );
+});
+
+test('toolFinalizePlan: refuses bad roadmap requirement refs', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({ phaseReqIds: ['REQ-01', 'REQ-02'] }),
+    'bad-roadmap-ref',
+  );
+});
+
+test('toolFinalizePlan: refuses bad state pointer', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({ statePointer: '09-99' }),
+    'bad-state-pointer',
+  );
+});
+
+test('toolFinalizePlan: refuses reverse coverage gaps', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({
+      reqIds: ['REQ-01', 'REQ-02'],
+      sliceReqIds: ['REQ-01'],
+      requirements: [
+        { id: 'REQ-01', text: 'First requirement.' },
+        { id: 'REQ-02', text: 'Second requirement.' },
+      ],
+      phaseReqIds: ['REQ-01', 'REQ-02'],
+    }),
+    'reverse-coverage',
+  );
+});
+
+test('toolFinalizePlan: empty plan reqIds skips reverse coverage check', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-empty-reqs-'));
+  try {
+    const bundle = makeBundle({
+      reqIds: [],
+      sliceReqIds: [],
+      phaseReqIds: ['REQ-01'],
+    });
+    const tool = toolFinalizePlan({ appendEntry: () => {} });
+    const result = await tool.execute(
+      '1',
+      { markdown: bundle },
+      undefined,
+      undefined,
+      { cwd: dir, sessionManager: cleanBundleSession(bundle) } as never,
+    );
+    assert.strictEqual((result.details as { ok: boolean }).ok, true);
+    await stat(
+      join(dir, 'docs', 'phases', '01-planning-artifacts', '01-01-PLAN.md'),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('toolFinalizePlan: refuses when state does not mark plan planned', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({
+      statePointer: null,
+      statePlans: [{ id: '01-01', phase: '01', status: 'pending' }],
+    }),
+    'plan-not-planned',
+  );
+});
+
+test('toolFinalizePlan: refuses a traversal plan id without writes', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({
+      planId: '../../../etc/pwn',
+      statePointer: '../../../etc/pwn',
+      statePlans: [{ id: '../../../etc/pwn', phase: '01', status: 'planned' }],
+    }),
+    'bad-plan-id',
+  );
+});
+
+test('toolFinalizePlan: refuses a traversal phase id without writes', async () => {
+  await assertFinalizeRefusal(
+    makeBundle({
+      planId: '01-01',
+      phase: '../../evil',
+      statePlans: [{ id: '01-01', phase: '01', status: 'planned' }],
+      roadmapPhases: [
+        {
+          id: '../../evil',
+          name: 'Escape',
+          reqIds: ['REQ-01'],
+          plans: ['01-01'],
+        },
+      ],
+    }),
+    'bad-phase-id',
+  );
+});
+
+test('toolFinalizePlan: bundle parse errors refuse without writes', async () => {
+  const bundle = makeBundle().replace('<!-- gpd:section=state -->', '');
+  await assertFinalizeRefusal(bundle, 'bundle-parse');
 });
 
 test('toolFinalizePlan: clears .gpd/candidate-plans/ on successful finalize', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-cleanup-'));
   try {
-    // Pre-populate the candidate-plans directory with two stale files.
-    const planDir = join(dir, '.gpd', 'candidate-plans');
-    const { mkdir: mkdirFs, writeFile: writeFileFs } =
-      await import('node:fs/promises');
-    await mkdirFs(planDir, { recursive: true });
-    await writeFileFs(join(planDir, 'stale-1.md'), '# stale 1', 'utf8');
-    await writeFileFs(join(planDir, 'stale-2.md'), '# stale 2', 'utf8');
-    await writeFileFs(join(planDir, '.DS_Store'), '', 'utf8');
-
-    const reviewedPlan = '# Final plan';
-    const tool = toolFinalizePlan({ appendEntry: () => {} });
-    await tool.execute('1', { markdown: reviewedPlan }, undefined, undefined, {
-      cwd: dir,
-      sessionManager: branchSession([
-        {
-          customType: ENTRY.planFinalized,
-          data: {
-            iteration: 0,
-            path: 'PLANS.md',
-          } satisfies GsdPlanFinalized,
-        },
-        {
-          customType: ENTRY.planReviewCycle,
-          data: {
-            iteration: 1,
-            ok: true,
-            candidatePlan: reviewedPlan,
-            raw: reviewJson({
-              blockers: [],
-              warnings: [],
-              nitpicks: [],
-              summary: 'ready',
-            }),
-            review: {
-              blockers: [],
-              warnings: [],
-              nitpicks: [],
-              summary: 'ready',
-            },
-            status: 'clean',
-          } satisfies GsdPlanReviewCycle,
-        },
-        {
-          customType: ENTRY.planningContext,
-          data: { iteration: 1, ...JSON.parse(planningContextJson()) },
-        },
-      ]),
-    } as never);
-
-    // Both stale files (and the non-.md junk) should be gone. Use stat to
-    // confirm the directory itself was also removed.
-    const { stat: statFs } = await import('node:fs/promises');
-    await assert.rejects(
-      () => statFs(planDir),
-      (err: NodeJS.ErrnoException) => err.code === 'ENOENT',
-      'candidate-plans directory should be removed after successful finalize',
-    );
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('toolFinalizePlan: does not clean up .gpd/candidate-plans/ when finalize fails', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'gsd-finalize-no-cleanup-'));
-  try {
     const { mkdir: mkdirFs, writeFile: writeFileFs } =
       await import('node:fs/promises');
     const planDir = join(dir, '.gpd', 'candidate-plans');
     await mkdirFs(planDir, { recursive: true });
-    await writeFileFs(join(planDir, 'keep-me.md'), '# keep', 'utf8');
+    await writeFileFs(join(planDir, 'stale.md'), '# stale', 'utf8');
 
+    const bundle = makeBundle();
     const tool = toolFinalizePlan({ appendEntry: () => {} });
-    // No persisted review cycle → finalize refuses → no cleanup.
-    await tool.execute('1', { markdown: '# anything' }, undefined, undefined, {
+    await tool.execute('1', { markdown: bundle }, undefined, undefined, {
       cwd: dir,
-      sessionManager: branchSession(),
+      sessionManager: cleanBundleSession(bundle),
     } as never);
 
-    const { readdir: readdirFs } = await import('node:fs/promises');
-    const remaining = await readdirFs(planDir);
-    assert.deepStrictEqual(remaining, ['keep-me.md']);
+    await assertPathMissing(planDir);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

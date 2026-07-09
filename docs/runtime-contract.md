@@ -17,7 +17,7 @@ The planner stays in the foreground. Focused exploration and review happen throu
 
 Two classes of file are intended on disk:
 
-- `PLANS.md` — the durable, finalized plan. Written only by `finalize-plan` after a clean persisted review cycle.
+- `docs/phases/NN-name/NN-CONTEXT.md` + `NN-MM-PLAN.md` and the living docs `docs/REQUIREMENTS.md`/`ROADMAP.md`/`STATE.md` — the durable, finalized plan artifacts. Written only by `finalize-plan` after a clean persisted review cycle.
 - `.gpd/candidate-plans/<id>.md` — per-cycle transient scratch files holding the plan text the reviewer read and `validate-plan` persisted. Written by `store-candidate-plan`. On a successful `finalize-plan` the directory is removed entirely (so no junk is ever left behind); `store-candidate-plan` recreates it on the next invocation. The directory is gitignored. On finalize failure the files are retained so the user can debug what the reviewer actually saw.
 
 Nothing else under `.gpd/` is part of the contract.
@@ -144,12 +144,13 @@ Rules:
 ```ts
 interface GsdPlanFinalized {
   iteration: number;
-  path: 'PLANS.md';
+  planId: string; // the NN-MM plan the bundle finalized
+  paths: string[]; // repo-relative artifacts + living docs written
   acceptedWarnings?: number; // count of warnings explicitly accepted at finalization
 }
 ```
 
-Written only after `PLANS.md` is successfully finalized. `acceptedWarnings` is set only when warnings were explicitly accepted via `finalize-plan`'s `acceptWarnings` flag.
+Written only after the reviewed plan bundle is successfully expanded into the phase artifacts (`NN-CONTEXT.md` + `NN-MM-PLAN.md`) and the living docs (`REQUIREMENTS.md`/`ROADMAP.md`/`STATE.md`, plan status `planned`). `acceptedWarnings` is set only when warnings were explicitly accepted via `finalize-plan`'s `acceptWarnings` flag.
 
 ## Planner tool surface
 
@@ -186,7 +187,7 @@ Notably absent:
 7. The planner passes the `candidatePlanId` (from step 5), raw review output, and the exact `planningContext` JSON into `validate-plan`. `validate-plan` resolves the id back to the stored plan, persists the context as `planning-context`, and persists the review cycle as `plan-review-cycle`.
 8. If the persisted result is `needs-revision`, the planner revises and repeats: a new `store-candidate-plan` call yields a fresh id, the reviewer reads the new path, and `validate-plan` looks up the new id.
 9. If the latest persisted result is `clean`, the planner may call `finalize-plan`. If the result has warnings but no blockers, the planner may still call `finalize-plan` with `acceptWarnings: true` after the user explicitly accepts the warnings.
-10. `finalize-plan` writes `PLANS.md` only when the markdown exactly matches the latest clean reviewed candidate plan and a `planning-context` entry exists for the same review iteration.
+10. `finalize-plan` expands the reviewed plan bundle into the phase artifacts + living docs only when the markdown matches the latest clean reviewed candidate bundle, a `planning-context` entry exists for the same review iteration, and the bundle passes the structural gates (requirement resolution + bidirectional coverage, roadmap refs, state pointer, plan marked `planned`, and valid `NN`/`NN-MM` ids).
 
 ## Failure behavior
 

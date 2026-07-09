@@ -66,10 +66,11 @@ export type GsdPlanReviewCycle =
       message: string;
     };
 
-/** Durable record that PLANS.md was written from a clean review cycle. */
+/** Durable record that phase artifacts/living docs were written from a clean review cycle. */
 export interface GsdPlanFinalized {
   iteration: number;
-  path: 'PLANS.md';
+  planId: string;
+  paths: string[];
   /** Number of warnings explicitly accepted at finalization. Omitted when zero. */
   acceptedWarnings?: number;
 }
@@ -118,7 +119,7 @@ export interface GsdStoredCandidatePlan {
  * single ```json fenced block as their sole machine-parseable source of
  * truth; surrounding prose is freeform and never parsed. NN-MM-PLAN.md is
  * heading-structured (the builder heading-map scans `### Slice <N>`), with a
- * tiny top-of-file JSON metadata block for id/phase/verify only.
+ * tiny top-of-file JSON metadata block for id/phase/reqIds/verify only.
  * ------------------------------------------------------------------ */
 
 /** Per-plan lifecycle status in the STATE ledger. */
@@ -203,16 +204,18 @@ export interface PlanSlice {
 }
 
 /**
- * NN-MM-PLAN.md parsed model. `verify`, when absent, is resolved from the
- * project default at build time; when present, it is a pinned command or the
- * literal string `none` (explicit no-verify). `outOfScope` is the
- * drift-boundary path/module list; an empty list round-trips as an `_none_`
- * marker. Slice prose is intentionally not modeled: the parser skips it and
- * `finalize-plan` writes reviewed bytes directly.
+ * NN-MM-PLAN.md parsed model. `reqIds` are the plan-level REQ ids this plan
+ * claims. `verify`, when absent, is resolved from the project default at build
+ * time; when present, it is a pinned command or the literal string `none`
+ * (explicit no-verify). `outOfScope` is the drift-boundary path/module list;
+ * an empty list round-trips as an `_none_` marker. Slice prose is intentionally
+ * not modeled: the parser skips it and `finalize-plan` writes reviewed bytes
+ * directly.
  */
 export interface PlanDoc {
   id: string;
   phase: string;
+  reqIds: string[];
   verify?: string;
   outOfScope: string[];
   slices: PlanSlice[];

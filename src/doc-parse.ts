@@ -10,7 +10,7 @@
  *     because the serialized block is itself a parseable doc.
  *   - NN-MM-PLAN.md is heading-structured (the builder heading-map scans
  *     `### Slice <N>`), with a tiny top-of-file JSON metadata block for
- *     id/phase/verify only. `parsePlanDoc` reads the metadata block, the
+ *     id/phase/reqIds/verify. `parsePlanDoc` reads the metadata block, the
  *     `## Out of Scope` list, and each `### Slice <N>` heading + its
  *     `#### Consumes` / `#### Produces` blocks. Slice prose is intentionally
  *     skipped. `serializePlanDoc` emits a prose-less doc; round-trip holds on
@@ -80,6 +80,15 @@ function requireStringArray(
     }
     return v;
   });
+}
+
+function optionalStringArray(
+  obj: Record<string, unknown>,
+  key: string,
+  entryType: string,
+): string[] {
+  if (obj[key] === undefined) return [];
+  return requireStringArray(obj, key, entryType);
 }
 
 function parseDocObject(
@@ -333,6 +342,7 @@ export function parsePlanDoc(text: string): PlanDoc {
   const meta = parseDocObject(normalized, 'plan');
   const id = requireString(meta, 'id', 'plan');
   const phase = requireString(meta, 'phase', 'plan');
+  const reqIds = optionalStringArray(meta, 'reqIds', 'plan');
   const verify =
     meta.verify !== undefined
       ? requireString(meta, 'verify', 'plan')
@@ -397,7 +407,7 @@ export function parsePlanDoc(text: string): PlanDoc {
     slices.push({ n, title, reqIds, consumes, produces });
   }
 
-  return { id, phase, verify, outOfScope, slices };
+  return { id, phase, reqIds, verify, outOfScope, slices };
 }
 
 export function serializePlanDoc(plan: PlanDoc): string {
@@ -406,6 +416,7 @@ export function serializePlanDoc(plan: PlanDoc): string {
     fencedJson({
       id: plan.id,
       phase: plan.phase,
+      reqIds: plan.reqIds,
       ...(plan.verify !== undefined ? { verify: plan.verify } : {}),
     }),
   );

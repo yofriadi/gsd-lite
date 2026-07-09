@@ -144,6 +144,7 @@ test('PLAN: slices, req brackets, interfaces, and verify command round-trip', ()
   const plan: PlanDoc = {
     id: '01-02',
     phase: '01',
+    reqIds: ['REQ-01', 'REQ-02'],
     verify: 'npm run verify',
     outOfScope: ['docs/generated/**', 'vendor/**'],
     slices: [
@@ -174,7 +175,7 @@ test('PLAN: slices, req brackets, interfaces, and verify command round-trip', ()
 
 test('PLAN: literal verify none and _none_ empty lists round-trip to empty arrays', () => {
   const text = [
-    fencedJson({ id: '02-01', phase: '02', verify: 'none' }),
+    fencedJson({ id: '02-01', phase: '02', reqIds: [], verify: 'none' }),
     '',
     '# Plan 02-01',
     '',
@@ -202,7 +203,7 @@ test('PLAN: literal verify none and _none_ empty lists round-trip to empty array
   assert.deepStrictEqual(parsePlanDoc(serializePlanDoc(parsed)), parsed);
 });
 
-test('PLAN: absent verify metadata stays undefined and serializes absent', () => {
+test('PLAN: plan-level reqIds default to [] and absent verify metadata stays undefined', () => {
   const text = [
     fencedJson({ id: '03-01', phase: '03' }),
     '',
@@ -224,9 +225,11 @@ test('PLAN: absent verify metadata stays undefined and serializes absent', () =>
   ].join('\n');
 
   const parsed = parsePlanDoc(text);
+  assert.deepStrictEqual(parsed.reqIds, []);
   assert.strictEqual(parsed.verify, undefined);
 
   const serialized = serializePlanDoc(parsed);
+  assert.ok(serialized.includes('"reqIds": []'));
   assert.ok(!serialized.includes('"verify"'));
   assert.deepStrictEqual(parsePlanDoc(serialized), parsed);
 });
@@ -235,6 +238,7 @@ test('PLAN: literal none bullet items round-trip without colliding with empty ma
   const plan: PlanDoc = {
     id: '04-01',
     phase: '04',
+    reqIds: [],
     verify: 'npm run verify',
     outOfScope: ['none'],
     slices: [
@@ -361,6 +365,7 @@ test('templates: machine-readable templates are structurally valid', async () =>
   const plan = parsePlanDoc(await readTemplate('PLAN'));
   assert.strictEqual(plan.id, 'NN-MM');
   assert.strictEqual(plan.phase, 'NN');
+  assert.deepStrictEqual(plan.reqIds, ['REQ-01']);
   assert.strictEqual(plan.verify, 'npm run verify');
   assert.ok(plan.slices.length >= 1);
 });

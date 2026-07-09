@@ -36,7 +36,11 @@ Before asking the user a high-value question, first use `codebase-explorer` to g
 
 ### Ground against the project's own setup (anti-greenfield)
 
-Before drafting any plan, detect and read the project's authoritative setup/config/build files for whatever stack this repo actually uses — e.g. `package.json`/`tsconfig.json`/lint configs for Node, `pyproject.toml`/`setup.cfg` for Python, `Cargo.toml` for Rust, `go.mod` for Go — plus `README`, `AGENTS.md`, and any existing `docs/`. Treat these as ground truth: plans must extend and respect the existing toolchain, conventions, and structure rather than assume a greenfield project. Record the relevant facts in `repoFindings`. Do NOT hardcode a single language's file list — read what this repo actually has.
+Before drafting any plan, detect and read the project's authoritative setup/config/build files for whatever stack this repo actually uses — e.g. `package.json`/`tsconfig.json`/lint configs for Node, `pyproject.toml`/`setup.cfg` for Python, `Cargo.toml` for Rust, `go.mod` for Go — plus `README`, `AGENTS.md`, and any existing `docs/`. Treat these as ground truth: plans must extend and respect the existing toolchain, conventions, and structure rather than assume a greenfield project. Grounding MUST also discover and pin the project's mechanical verify command (for example an npm `verify` script, `make check`, or `cargo test`) into context so the builder's per-slice verify gate has a resolved command; if none is discoverable, record `verify: none` explicitly in the plan rather than leaving it unset. Record the relevant facts in `repoFindings`. Do NOT hardcode a single language's file list — read what this repo actually has.
+
+### Surface alternatives
+
+When a genuine design fork exists, present 2–3 approaches with tradeoffs and a specific recommendation before pinning the plan. Do not invent alternatives for a straightforward implementation; use this only when the choice changes architecture, risk, or sequencing.
 
 ### Known-unknowns triage
 
@@ -86,8 +90,8 @@ Then formalize the planning context JSON above.
 
 ## Review loop
 
-After that, review the plan using the `plan-reviewer` agent.
-The reviewer runs with `inherit_context: false`, so you must pass the full planning context and the stored candidate plan path in the subagent prompt. The reviewer will `read` the file at the path you provide and score exactly those bytes. The project-specific reviewer in `.pi/agent/agents/plan-reviewer.md` will refuse to score if the context is missing.
+After that, review the plan bundle using the `plan-reviewer` agent.
+The reviewer runs with `inherit_context: false`, so you must pass the full planning context and the stored candidate plan bundle path in the subagent prompt. The reviewer will `read` the file at the path you provide and score exactly those bytes. The project-specific reviewer in `.pi/agent/agents/plan-reviewer.md` will refuse to score if the context is missing.
 
 `validate-plan` does not perform the review; it only parses and persists the `plan-reviewer` result.
 If the subagent reports an unknown agent type, stop and report that `plan-reviewer` is unavailable in the current Pi agent directory.
@@ -95,10 +99,29 @@ Do not hand-write or reformat review JSON yourself. Only pass through the raw `p
 
 ### Single source of truth: store, then reference
 
-The planner, the reviewer, and the validator must all act on the **same bytes** of the candidate plan. Every review cycle starts with a single `store-candidate-plan` call that writes the plan to `<cwd>/.gpd/candidate-plans/<id>.md` and persists the id. The reviewer `read`s the file at the returned path; `validate-plan` looks the id back up. There is no inline-plan path: an LLM cannot be trusted to re-type the same markdown verbatim into two places, so the API no longer lets it try.
+The planner, the reviewer, and the validator must all act on the **same bytes** of the candidate plan bundle. Every review cycle starts with a single `store-candidate-plan` call that writes the bundle to `<cwd>/.gpd/candidate-plans/<id>.md` and persists the id. The bundle contains the PLAN plus complete post-state REQUIREMENTS/ROADMAP/STATE sections in this exact marker format:
+
+````text
+<!-- gpd:section=plan -->
+<full NN-MM-PLAN.md markdown>
+<!-- gpd:section=requirements -->
+```json
+{ "requirements": [ ... complete list ... ] }
+```
+<!-- gpd:section=roadmap -->
+```json
+{ "phases": [ ... complete list ... ] }
+```
+<!-- gpd:section=state -->
+```json
+{ "pointer": "NN-MM", "plans": [ ... complete ledger ... ] }
+```
+````
+
+The REQUIREMENTS/ROADMAP/STATE sections carry the COMPLETE json for each living doc after the planned change; finalize does not merge. The planner allocates the `NN-MM` id from ROADMAP/STATE (conceptually using `allocatePlanId` semantics); the user never types it. The reviewer `read`s the file at the returned path; `validate-plan` looks the id back up. There is no inline-plan path: an LLM cannot be trusted to re-type the same markdown verbatim into two places, so the API no longer lets it try.
 
 ```text
-store-candidate-plan({ plan: "<candidate plan markdown>" })
+store-candidate-plan({ plan: "<candidate plan bundle markdown>" })
 // returns: { id, path, iteration }
 ```
 
@@ -112,7 +135,7 @@ validate-plan({
 })
 ```
 
-When you revise the plan to address blockers or warnings, call `store-candidate-plan` again to get a fresh id; do not reuse the old id with a different plan. Each cycle has its own stored artifact.
+When you revise the bundle to address blockers or warnings, call `store-candidate-plan` again to get a fresh id; do not reuse the old id with different markdown. Each cycle has its own stored artifact.
 
 **Revise in place, do not regenerate.** When revising, edit the *prior* stored candidate bundle to address the specific reviewer critique (blockers/warnings) and leave unrelated sections intact. Do not regenerate the CONTEXT+PLAN+deltas bundle from scratch. The context-drift pin and `reviewReadFingerprint` guard the pinned planning-context JSON and prove the reviewer read the stored bytes, but they do not stop a from-scratch rewrite while the context JSON stays byte-identical — so keeping the diff surgical is a convention you must hold. Then re-store the revised bundle for a fresh id.
 
@@ -126,7 +149,7 @@ On a successful `finalize-plan`, the runtime removes `.gpd/candidate-plans/` ent
 
 ### Recovery on parse / aborted / stopped / error cycles
 
-When `validate-plan` persists a failed cycle (`status` is `parse`, `aborted`, `stopped`, or `error`), the tool response includes a recovery hint. Follow it: rerun `plan-reviewer` once against the same candidate plan, then call `validate-plan` again with the same `candidatePlanId`. If the second attempt also fails, stop the loop and surface the failed cycle to the user — do not keep retrying silently. If you decide the plan itself is the problem, re-store the plan first and use the new id.
+When `validate-plan` persists a failed cycle (`status` is `parse`, `aborted`, `stopped`, or `error`), the tool response includes a recovery hint. Follow it: rerun `plan-reviewer` once against the same candidate bundle, then call `validate-plan` again with the same `candidatePlanId`. If the second attempt also fails, stop the loop and surface the failed cycle to the user — do not keep retrying silently. If you decide the bundle itself is the problem, re-store the bundle first and use the new id.
 
 After each plan-reviewer run, call:
 
@@ -164,7 +187,7 @@ Only after the latest `validate-plan` result has **no blockers**, and any remain
 
 ```text
 finalize-plan({
-  markdown: "<exact final PLANS.md markdown>"
+  markdown: "<exact final plan bundle markdown>"
 })
 ```
 
@@ -172,15 +195,15 @@ If warnings were accepted, pass `acceptWarnings: true` so the tool records them 
 
 ```text
 finalize-plan({
-  markdown: "<exact final PLANS.md markdown>",
+  markdown: "<exact final plan bundle markdown>",
   acceptWarnings: true
 })
 ```
 
-After a clean review, pass that exact reviewed markdown directly to `finalize-plan` with no renames, heading changes, reformatting, or content edits.
+After a clean review, pass that exact reviewed bundle directly to `finalize-plan` with no renames, heading changes, reformatting, or content edits. `finalize-plan` expands the bundle into `docs/phases/NN-name/NN-CONTEXT.md` and `docs/phases/NN-name/NN-MM-PLAN.md`, writes `docs/REQUIREMENTS.md`, `docs/ROADMAP.md`, and `docs/STATE.md`, and requires the plan's STATE row to be `planned`. It does not write `PLANS.md`.
 If the markdown changes after a clean review, rerun `plan-reviewer` and `validate-plan` before finalizing.
 
-`PLANS.md` is the only artifact for this workflow.
+The reviewed bundle is the single source of truth for this workflow; finalize deterministically expands it into phase artifacts and living docs.
 
 ## Do not
 

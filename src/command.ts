@@ -3,7 +3,8 @@
  *
  * Starts an interview-driven planning session in the current session. The
  * planner uses synchronous `pi-subagents` delegation for focused exploration,
- * GitHub/code research, and plan review before writing the final `PLANS.md`.
+ * GitHub/code research, and plan review before expanding a reviewed bundle into
+ * phase artifacts plus the living REQUIREMENTS/ROADMAP/STATE docs.
  */
 import type {
   ExtensionAPI,
@@ -25,7 +26,7 @@ type PlanAPI = Pick<
 export function cmdPlan(pi: PlanAPI) {
   return {
     description:
-      'No-arg scaffolds the empty REQUIREMENTS/ROADMAP/STATE ledger; /plan "<topic>" starts an interview-driven planning conversation that uses synchronous foreground subagents and writes PLANS.md after review passes.',
+      'No-arg scaffolds the empty REQUIREMENTS/ROADMAP/STATE ledger; /plan "<topic>" starts an interview-driven planning conversation that uses synchronous foreground subagents and expands a reviewed bundle into phase artifacts plus living docs after review passes.',
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const topic = args.trim();
 

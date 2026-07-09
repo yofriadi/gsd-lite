@@ -16,8 +16,8 @@ Current repo status:
 - `/plan` starts an interview-driven planning session
 - planning uses synchronous `subagent` calls for repo exploration, GitHub research, and `plan-reviewer`
 - `validate-plan` persists each review cycle before finalization
-- `finalize-plan` is the only path that writes `PLANS.md`
-- `PLANS.md` is the only intended filesystem artifact for the planning flow
+- `finalize-plan` is the only path that expands a reviewed plan bundle into `docs/phases/NN-name/NN-CONTEXT.md` + `NN-MM-PLAN.md` and updates the living docs (`docs/REQUIREMENTS.md`/`ROADMAP.md`/`STATE.md`)
+- those phase artifacts + living docs are the intended filesystem output of the planning flow
 
 Verification:
 
