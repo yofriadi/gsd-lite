@@ -10,7 +10,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { buildStarterPrompt, cmdPlan, planningToolNames } from './command.js';
+import {
+  buildScaffoldPrompt,
+  buildStarterPrompt,
+  cmdPlan,
+  planningToolNames,
+  scaffoldToolNames,
+} from './command.js';
 
 test('buildStarterPrompt: does not prepend duplicate grilling skill text', async () => {
   const prompt = await buildStarterPrompt('solve the thing');
@@ -178,4 +184,51 @@ test('buildStarterPrompt: instructs the agent on how to handle missing/unknown p
       'If the subagent reports an unknown agent type, stop and report that `plan-reviewer` is unavailable in the current Pi agent directory.',
     ),
   );
+});
+
+test('scaffoldToolNames: read-only grounding + the scaffold writer only', () => {
+  assert.deepStrictEqual(scaffoldToolNames(), ['read', 'ls', 'scaffold-docs']);
+  assert.ok(!scaffoldToolNames().includes('subagent'));
+  assert.ok(!scaffoldToolNames().includes('write'));
+});
+
+test('buildScaffoldPrompt: directs a single scaffold-docs call', () => {
+  const prompt = buildScaffoldPrompt();
+  assert.ok(prompt.includes('scaffold-docs'));
+  assert.ok(prompt.includes('REQUIREMENTS.md'));
+  assert.ok(prompt.includes('/plan "<topic>"'));
+});
+
+test('cmdPlan: no-arg enables scaffold tools and sends the scaffold prompt (no subagent required)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsd-cmd-'));
+  let tools: string[] = [];
+  let sent = '';
+  let notified: { message: string; level: string } | null = null;
+  try {
+    const cmd = cmdPlan({
+      // No subagent tool available: the no-arg scaffold branch must not require it.
+      getActiveTools: () => ['read'],
+      setActiveTools: (names) => {
+        tools = names;
+      },
+      sendUserMessage: (message) => {
+        sent = typeof message === 'string' ? message : JSON.stringify(message);
+      },
+    });
+
+    await cmd.handler('   ', {
+      cwd: dir,
+      ui: {
+        notify: (message: string, level: string) => {
+          notified = { message, level };
+        },
+      },
+    } as never);
+
+    assert.deepStrictEqual(tools, scaffoldToolNames());
+    assert.strictEqual(notified, null);
+    assert.ok(sent.includes('scaffold-docs'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -15,6 +15,21 @@ export type TemplateName =
   | 'PLAN'
   | 'SUMMARY';
 
+/**
+ * Living ledger doc names written into the target project's `docs/` dir.
+ * `PROJECT` is written by `finalize-init`; the `REQUIREMENTS`/`ROADMAP`/`STATE`
+ * trio is scaffolded by `scaffold-docs` and evolved by the plan/build tools.
+ */
+export type DocName = 'PROJECT' | 'REQUIREMENTS' | 'ROADMAP' | 'STATE';
+
+/** Subdirectory of the target project cwd that holds the living ledger docs. */
+export const DOCS_DIR = 'docs';
+
+/** Absolute path to a living ledger doc under the target project's `docs/` dir. */
+export function docTargetPath(cwd: string, name: DocName): string {
+  return join(cwd, DOCS_DIR, `${name}.md`);
+}
+
 export function templatePath(name: TemplateName): string {
   return join(PACKAGE_ROOT, 'templates', `${name}.md`);
 }

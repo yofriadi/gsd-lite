@@ -25,21 +25,28 @@ type PlanAPI = Pick<
 export function cmdPlan(pi: PlanAPI) {
   return {
     description:
-      'Start an interview-driven planning conversation that uses synchronous foreground subagents and writes PLANS.md after review passes.',
+      'No-arg scaffolds the empty REQUIREMENTS/ROADMAP/STATE ledger; /plan "<topic>" starts an interview-driven planning conversation that uses synchronous foreground subagents and writes PLANS.md after review passes.',
     handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const topic = args.trim();
+
+      // No-arg: mechanically scaffold the living ledger docs. This branch does
+      // not need the subagent tool; it just enables scaffold-docs and asks the
+      // model to call it.
+      if (!topic) {
+        pi.setActiveTools(scaffoldToolNames());
+        try {
+          pi.sendUserMessage(buildScaffoldPrompt());
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          ctx.ui.notify(`Failed to scaffold docs: ${msg}`, 'error');
+        }
+        return;
+      }
+
       if (!pi.getActiveTools().includes('subagent')) {
         ctx.ui.notify(
           'plan requires the subagent tool from @gotgenes/pi-subagents. Enable that extension and retry.',
           'error',
-        );
-        return;
-      }
-
-      const topic = args.trim();
-      if (!topic) {
-        ctx.ui.notify(
-          'Please specify a planning topic. E.g., /plan implement auth',
-          'warning',
         );
         return;
       }
@@ -54,6 +61,26 @@ export function cmdPlan(pi: PlanAPI) {
       }
     },
   };
+}
+
+/** Tools active for no-arg `/plan`: read-only grounding + the scaffold writer. */
+export function scaffoldToolNames(): string[] {
+  return ['read', 'ls', 'scaffold-docs'];
+}
+
+/**
+ * Starter message for no-arg `/plan`: instruct the model to bootstrap the
+ * living ledger by calling `scaffold-docs`. Kept inline (not a prompt file)
+ * because the instruction is a single mechanical tool call.
+ */
+export function buildScaffoldPrompt(): string {
+  return [
+    'Bootstrap the living planning ledger for this project.',
+    '',
+    'Call the `scaffold-docs` tool once. It writes empty docs/REQUIREMENTS.md, docs/ROADMAP.md, and docs/STATE.md from templates and refuses to clobber any of those docs that already has real content.',
+    '',
+    'Do not interview, do not plan, and do not write any file yourself — `scaffold-docs` is the only action for no-arg `/plan`. After it returns, report which docs were written vs. left untouched, and tell the user to run `/plan "<topic>"` to plan the first phase.',
+  ].join('\n');
 }
 
 export function planningToolNames(): string[] {

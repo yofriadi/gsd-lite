@@ -1,13 +1,16 @@
 /**
  * gsd-lite Pi extension entry point.
  *
- * Registers the `/plan` command plus hard-gated review/finalize tools for
- * grilling-led planning with synchronous pi-subagents exploration/research.
+ * Registers the `/plan` and `/init` commands plus hard-gated review/finalize
+ * and mechanical scaffold/init tools for grilling-led planning with
+ * synchronous pi-subagents exploration/research.
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { cmdPlan } from './src/command.js';
+import { cmdInit } from './src/init-command.js';
+import { toolFinalizeInit, toolScaffoldDocs } from './src/init-tools.js';
 import {
   toolFinalizePlan,
   toolStoreCandidatePlan,
@@ -18,5 +21,8 @@ export default function register(pi: ExtensionAPI): void {
   pi.registerTool(toolStoreCandidatePlan(pi));
   pi.registerTool(toolValidatePlan(pi));
   pi.registerTool(toolFinalizePlan(pi));
+  pi.registerTool(toolFinalizeInit());
+  pi.registerTool(toolScaffoldDocs());
   pi.registerCommand('plan', cmdPlan(pi));
+  pi.registerCommand('init', cmdInit(pi));
 }
