@@ -90,6 +90,7 @@ export function buildToolNames(): string[] {
     'subagent',
     'store-candidate-change',
     'validate-change',
+    'finalize-build',
   ];
 }
 
@@ -340,8 +341,7 @@ export function cmdBuild(pi: BuildAPI, options: BuildCommandOptions = {}) {
         );
 
         if (result.status === 'completed') {
-          // finalize-build is implemented/registered in Phase 6/7. This
-          // terminal prompt is the trigger once that hard-gate tool exists.
+          // This terminal prompt triggers the finalize-build hard gate.
           pi.sendUserMessage(buildFinalizePrompt(plan.id, plan.reqIds));
         } else {
           ctx.ui.notify(

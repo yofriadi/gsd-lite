@@ -66,6 +66,7 @@ test('buildToolNames enables source mutation plus build gate tools', () => {
     'subagent',
     'store-candidate-change',
     'validate-change',
+    'finalize-build',
   ]);
 });
 

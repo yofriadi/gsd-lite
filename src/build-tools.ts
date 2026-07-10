@@ -1,7 +1,15 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rmdir,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import {
@@ -13,21 +21,64 @@ import {
 import { Text } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 
+import {
+  parsePlanDoc,
+  parseRequirementsDoc,
+  parseRoadmapDoc,
+  parseStateDoc,
+  serializeRequirementsBlock,
+  serializeStateBlock,
+} from './doc-parse.js';
+import { renderAttemptsTable } from './doc-render.js';
 import { ParseError, parseReviewResult } from './parse.js';
 import { fingerprintEquals, planFingerprint } from './plan-tools.js';
+import { readTemplate } from './templates.js';
+import {
+  SLICE_RESULT_MESSAGE_TYPE,
+  type SliceResultHandoff,
+} from './build-runtime.js';
 import {
   ENTRY,
+  type GsdBuildFinalized,
   type GsdChangeReviewCycle,
   type GsdReviewResult,
   type GsdStoredCandidateChange,
+  type Requirement,
+  type RequirementsDoc,
+  type RoadmapDoc,
+  type StateLedger,
   type ReviewEntry,
+  type VerifyEvidence,
   type VerifyResult,
 } from './types.js';
 
 type BuildToolAPI = Pick<ExtensionAPI, 'appendEntry'>;
 
+export interface FinalizeBuildIO {
+  readFile?: (path: string, encoding: 'utf8') => Promise<string>;
+  writeFile?: (
+    path: string,
+    content: string,
+    encoding: 'utf8',
+  ) => Promise<void>;
+  mkdir?: (path: string, opts: { recursive: true }) => Promise<unknown>;
+  rename?: (from: string, to: string) => Promise<void>;
+  unlink?: (path: string) => Promise<void>;
+}
+
+type SessionEntry = {
+  type?: string;
+  customType?: string;
+  data?: unknown;
+  details?: unknown;
+};
+
 type BranchSessionManager = {
-  getBranch(): Array<{ type?: string; customType?: string; data?: unknown }>;
+  getBranch(): SessionEntry[];
+};
+
+type EntryLogSessionManager = {
+  getEntries(): SessionEntry[];
 };
 
 type ValidateChangeParams = {
@@ -50,6 +101,29 @@ const isStringArray = (v: unknown): v is string[] =>
 function asBranchSessionManager(value: unknown): BranchSessionManager | null {
   if (!isRecord(value) || typeof value.getBranch !== 'function') return null;
   return value as unknown as BranchSessionManager;
+}
+
+function asEntryLogSessionManager(
+  value: unknown,
+): EntryLogSessionManager | null {
+  if (!isRecord(value) || typeof value.getEntries !== 'function') return null;
+  return value as unknown as EntryLogSessionManager;
+}
+
+function sessionEntries(sessionManager: unknown): SessionEntry[] {
+  const logSession = asEntryLogSessionManager(sessionManager);
+  if (logSession) return logSession.getEntries();
+  const branchSession = asBranchSessionManager(sessionManager);
+  return branchSession ? branchSession.getBranch() : [];
+}
+
+function isMissingFileError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'ENOENT'
+  );
 }
 
 function isReviewEntry(value: unknown): value is ReviewEntry {
@@ -325,6 +399,167 @@ export function pathMatchesOutOfScope(
   return findOutOfScopeMatch(file, patterns) !== undefined;
 }
 
+function ensureTrailingNewline(text: string): string {
+  return text.endsWith('\n') ? text : `${text}\n`;
+}
+
+function slug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/** A phase id is exactly `NN` (two or more digits). */
+function isValidPhaseId(id: string): boolean {
+  return /^\d{2,}$/.test(id);
+}
+
+/** A plan id is exactly `NN-MM` (two or more digits, dash, two or more digits). */
+function isValidPlanId(id: string): boolean {
+  return /^\d{2,}-\d{2,}$/.test(id);
+}
+
+function replaceJsonBlock(templateText: string, newBlock: string): string {
+  const replaced = templateText.replace(/```json[\s\S]*?```/, newBlock);
+  return ensureTrailingNewline(replaced);
+}
+
+function replaceMarkdownSection(
+  doc: string,
+  heading: string,
+  body: string,
+): string {
+  const normalized = doc.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const headingLine = `## ${heading}`;
+  const start = lines.findIndex((line) => line.trim() === headingLine);
+  if (start === -1) {
+    return ensureTrailingNewline(
+      [normalized.replace(/\n+$/, ''), '', headingLine, '', body].join('\n'),
+    );
+  }
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  const bodyLines = body.replace(/\r\n/g, '\n').replace(/\n+$/, '').split('\n');
+  lines.splice(start + 1, end - start - 1, '', ...bodyLines, '');
+  return ensureTrailingNewline(
+    lines.join('\n').replace(/\n{3,}(?=##\s+)/g, '\n\n'),
+  );
+}
+
+function sectionBody(renderedSection: string): string {
+  const lines = renderedSection.replace(/\r\n/g, '\n').split('\n');
+  if (/^##\s+/.test(lines[0] ?? '')) return lines.slice(1).join('\n').trim();
+  return renderedSection.trim();
+}
+
+function bulletsOrNone(items: readonly string[]): string {
+  if (items.length === 0) return '- _none_';
+  return items.map((item) => `- ${item}`).join('\n');
+}
+
+export function advanceStateAfterBuild(
+  state: StateLedger,
+  roadmap: RoadmapDoc,
+  planId: string,
+): StateLedger {
+  const plans = state.plans.map((plan) =>
+    plan.id === planId ? { ...plan, status: 'built' as const } : { ...plan },
+  );
+  const statusByPlan = new Map(plans.map((plan) => [plan.id, plan.status]));
+  const orderedPlanIds = roadmap.phases.flatMap((phase) => phase.plans);
+  const nextPlanned = orderedPlanIds.find(
+    (id) => statusByPlan.get(id) === 'planned',
+  );
+  if (nextPlanned) {
+    return {
+      pointer: nextPlanned,
+      next: {
+        command: '/build',
+        planId: nextPlanned,
+        reason: 'planned-but-unbuilt',
+      },
+      plans,
+    };
+  }
+  const nextPending = orderedPlanIds.find(
+    (id) => statusByPlan.get(id) === 'pending',
+  );
+  if (nextPending) {
+    return {
+      pointer: nextPending,
+      next: {
+        command: '/plan',
+        planId: nextPending,
+        reason: 'roadmap-item-pending',
+      },
+      plans,
+    };
+  }
+  return { pointer: null, next: null, plans };
+}
+
+export function closeRequirements(
+  doc: RequirementsDoc,
+  reqIds: string[],
+  evidence: {
+    planId: string;
+    summaryPath: string;
+    verify: VerifyEvidence;
+    commitRange?: string;
+  },
+): RequirementsDoc {
+  const closingReqIds = new Set(reqIds);
+  return {
+    requirements: doc.requirements.map((req) => {
+      if (!closingReqIds.has(req.id)) return { ...req };
+      const closed: Requirement = {
+        ...req,
+        satisfiedBy: evidence.planId,
+        summary: evidence.summaryPath,
+        validatedBy: 'code-reviewer',
+        verify: { command: evidence.verify.command, ok: true },
+      };
+      if (evidence.commitRange !== undefined) {
+        closed.evidence = evidence.commitRange;
+      } else {
+        delete closed.evidence;
+      }
+      return closed;
+    }),
+  };
+}
+
+function splitCommitRange(range: string): [string, string] | null {
+  const idx = range.indexOf('..');
+  if (idx === -1) return null;
+  const base = range.slice(0, idx);
+  const head = range.slice(idx + 2);
+  if (base.length === 0 || head.length === 0) return null;
+  return [base, head];
+}
+
+export function deriveCommitRange(ranges: string[]): string | undefined {
+  const cleaned = ranges.map((range) => range.trim()).filter(Boolean);
+  if (cleaned.length === 0) return undefined;
+  if (cleaned.length === 1) return cleaned[0];
+  const parsed = cleaned.map(splitCommitRange);
+  if (parsed.some((range) => range === null)) {
+    return [...new Set(cleaned)].join(', ');
+  }
+  const first = parsed[0];
+  const last = parsed[parsed.length - 1];
+  if (!first || !last) return [...new Set(cleaned)].join(', ');
+  return `${first[0]}..${last[1]}`;
+}
+
 function computeVerifyResult(
   verifyCommand: string | null,
   verifyExitCode: number | null,
@@ -402,6 +637,197 @@ function buildChangeCycleFailure(
   };
 }
 
+function latestBySlice<T extends { sliceN: number; iteration: number }>(
+  values: readonly T[],
+): Map<number, T> {
+  const latest = new Map<number, T>();
+  for (const value of values) {
+    const prev = latest.get(value.sliceN);
+    if (!prev || value.iteration >= prev.iteration)
+      latest.set(value.sliceN, value);
+  }
+  return latest;
+}
+
+function changeReviewCyclesForPlan(
+  entries: readonly SessionEntry[],
+  planId: string,
+): GsdChangeReviewCycle[] {
+  return entries
+    .filter(
+      (entry) =>
+        entry.customType === ENTRY.changeReviewCycle &&
+        isChangeReviewCycleData(entry.data) &&
+        entry.data.planId === planId,
+    )
+    .map((entry) => entry.data as GsdChangeReviewCycle);
+}
+
+function storedCandidateChangesForPlan(
+  entries: readonly SessionEntry[],
+  planId: string,
+): GsdStoredCandidateChange[] {
+  return entries
+    .filter(
+      (entry) =>
+        entry.customType === ENTRY.storedCandidateChange &&
+        isStoredCandidateChangeData(entry.data) &&
+        entry.data.planId === planId,
+    )
+    .map((entry) => entry.data as GsdStoredCandidateChange);
+}
+
+function planAndSliceReqIds(plan: {
+  reqIds: string[];
+  slices: Array<{ reqIds: string[] }>;
+}): string[] {
+  const referenced = new Set<string>(plan.reqIds);
+  for (const slice of plan.slices) {
+    for (const reqId of slice.reqIds) referenced.add(reqId);
+  }
+  return [...referenced];
+}
+
+function sliceReqIdsNotClaimed(plan: {
+  reqIds: string[];
+  slices: Array<{ reqIds: string[] }>;
+}): string[] {
+  const claimed = new Set(plan.reqIds);
+  const missing = new Set<string>();
+  for (const slice of plan.slices) {
+    for (const reqId of slice.reqIds) {
+      if (!claimed.has(reqId)) missing.add(reqId);
+    }
+  }
+  return [...missing];
+}
+
+function latestAcceptedCycle(
+  cycles: readonly GsdChangeReviewCycle[],
+  latestCycles: ReadonlyMap<number, GsdChangeReviewCycle>,
+  sliceNs: ReadonlySet<number>,
+): GsdChangeReviewCycle | undefined {
+  for (let i = cycles.length - 1; i >= 0; i--) {
+    const cycle = cycles[i];
+    if (
+      cycle &&
+      sliceNs.has(cycle.sliceN) &&
+      latestCycles.get(cycle.sliceN) === cycle &&
+      cycle.ok
+    ) {
+      return cycle;
+    }
+  }
+  return undefined;
+}
+
+function isSliceResultHandoff(value: unknown): value is SliceResultHandoff {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.path === 'string' &&
+    typeof value.digest === 'string' &&
+    isRecord(value.counts) &&
+    isVerifyResultData(value.verify) &&
+    (value.outcome === 'clean' ||
+      value.outcome === 'warnings-only' ||
+      value.outcome === 'blockers') &&
+    (value.commitRange === undefined || typeof value.commitRange === 'string')
+  );
+}
+
+function sliceResultSliceN(
+  planId: string,
+  handoff: SliceResultHandoff,
+): number | null {
+  const marker = `${planId}-slice-`;
+  const idx = handoff.path.replace(/\\/g, '/').lastIndexOf(marker);
+  if (idx === -1) return null;
+  const rest = handoff.path.slice(idx + marker.length);
+  const match = rest.match(/^(\d+)\.md$/);
+  return match ? Number(match[1]) : null;
+}
+
+function commitRangesFromSliceResults(
+  entries: readonly SessionEntry[],
+  planId: string,
+): string[] {
+  const latestByResultSlice = new Map<
+    number,
+    { order: number; sliceN: number; commitRange: string }
+  >();
+  for (let order = 0; order < entries.length; order++) {
+    const entry = entries[order];
+    if (entry?.customType !== SLICE_RESULT_MESSAGE_TYPE) continue;
+    const payload = isSliceResultHandoff(entry.details)
+      ? entry.details
+      : isSliceResultHandoff(entry.data)
+        ? entry.data
+        : null;
+    if (!payload || payload.commitRange === undefined) continue;
+    const sliceN = sliceResultSliceN(planId, payload);
+    if (sliceN === null) continue;
+    latestByResultSlice.set(sliceN, {
+      order,
+      sliceN,
+      commitRange: payload.commitRange,
+    });
+  }
+  return [...latestByResultSlice.values()]
+    .sort((a, b) => a.sliceN - b.sliceN || a.order - b.order)
+    .map((item) => item.commitRange);
+}
+
+async function atomicWriteAll(
+  entries: ReadonlyArray<{ path: string; content: string }>,
+  io: Required<
+    Pick<FinalizeBuildIO, 'writeFile' | 'mkdir' | 'rename' | 'unlink'>
+  >,
+): Promise<void> {
+  const staged: Array<{ tmp: string; path: string }> = [];
+  try {
+    for (const { path, content } of entries) {
+      const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+      staged.push({ tmp, path });
+      await io.mkdir(dirname(path), { recursive: true });
+      await io.writeFile(tmp, content, 'utf8');
+    }
+  } catch (err) {
+    await Promise.all(staged.map((s) => io.unlink(s.tmp).catch(() => {})));
+    throw err;
+  }
+  for (const { tmp, path } of staged) {
+    await io.rename(tmp, path);
+  }
+}
+
+async function clearFlatDir(dir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries.map((name) => unlink(join(dir, name)).catch(() => {})),
+  );
+  await rmdir(dir).catch(() => {});
+}
+
+export async function clearBuildArtifacts(cwd: string): Promise<void> {
+  await Promise.all([
+    clearFlatDir(join(cwd, '.gpd', 'candidate-changes')),
+    clearFlatDir(join(cwd, '.gpd', 'slice-results')),
+  ]);
+}
+
+function roadmapPlanSet(roadmap: RoadmapDoc): Set<string> {
+  return new Set(roadmap.phases.flatMap((phase) => phase.plans));
+}
+
+function statePlanSet(state: StateLedger): Set<string> {
+  return new Set(state.plans.map((plan) => plan.id));
+}
+
 async function gitAvailable(cwd: string): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync(
@@ -473,6 +899,360 @@ async function collectGitChangeArtifacts(cwd: string): Promise<
 
 function touchedFilesParam(value: unknown): string[] {
   return isStringArray(value) ? value.map(normalizeRepoPath) : [];
+}
+
+export function toolFinalizeBuild(
+  pi: BuildToolAPI,
+  io: FinalizeBuildIO = {},
+): ToolDefinition {
+  return defineTool({
+    name: 'finalize-build',
+    label: 'Finalize Build',
+    description:
+      'Finalize a completed /build only after re-verifying every persisted slice review cycle, refusing blockers or failing verify results, accepting warnings only when explicitly allowed, closing REQUIREMENTS traceability, advancing STATE, writing SUMMARY, and appending a build-finalized entry.',
+    promptSnippet:
+      'Call finalize-build from the /build terminal prompt once all slices for the plan are clean or warnings-only. Pass acceptWarnings: true only when the user explicitly accepts remaining warnings.',
+    promptGuidelines: [
+      'This tool re-reads STATE, ROADMAP, REQUIREMENTS, the PLAN doc, and the full append-only session log; do not summarize slice status yourself.',
+      'Every slice in the PLAN must have a latest persisted change-review-cycle. Missing, failed, blocker, or verify-failing cycles always refuse; failing verify can never be accepted.',
+      'Warnings-only slices finalize only when acceptWarnings is true and the user explicitly accepts those warnings.',
+      'The tool independently re-checks stored touched files against the PLAN out-of-scope list before writing anything.',
+      'On success it writes NN-MM-SUMMARY.md, advances STATE.md, closes REQUIREMENTS.md traceability, clears build scratch artifacts, and appends build-finalized.',
+    ],
+    parameters: Type.Object({
+      planId: Type.String(),
+      summary: Type.String(),
+      deliverables: Type.Array(Type.String()),
+      acceptWarnings: Type.Optional(Type.Boolean()),
+    }),
+    renderCall(args) {
+      return new Text(String(args.planId), 0, 0);
+    },
+    async execute(_id, params, _signal, _onUpdate, ctx: ExtensionContext) {
+      const planId = String(params.planId);
+      if (!isValidPlanId(planId)) {
+        return simpleResult(
+          `Cannot finalize build: plan id ${JSON.stringify(planId)} is not a valid NN-MM id.`,
+          { ok: false, reason: 'bad-plan-id', planId },
+        );
+      }
+
+      const readFileFs = io.readFile ?? readFile;
+      const writeIo = {
+        writeFile: io.writeFile ?? writeFile,
+        mkdir: io.mkdir ?? mkdir,
+        rename: io.rename ?? rename,
+        unlink: io.unlink ?? unlink,
+      };
+
+      const [stateText, roadmapText, requirementsText] = await Promise.all([
+        readFileFs(join(ctx.cwd, 'docs', 'STATE.md'), 'utf8'),
+        readFileFs(join(ctx.cwd, 'docs', 'ROADMAP.md'), 'utf8'),
+        readFileFs(join(ctx.cwd, 'docs', 'REQUIREMENTS.md'), 'utf8'),
+      ]);
+      const state = parseStateDoc(stateText);
+      const roadmap = parseRoadmapDoc(roadmapText);
+      const requirements = parseRequirementsDoc(requirementsText);
+
+      if (
+        !statePlanSet(state).has(planId) ||
+        !roadmapPlanSet(roadmap).has(planId)
+      ) {
+        return simpleResult(
+          `Cannot finalize build ${planId}: plan is not present in STATE.md and ROADMAP.md; run /build first after finalizing the plan.`,
+          { ok: false, reason: 'plan-not-found', planId },
+        );
+      }
+
+      const phaseId = planId.split('-')[0] ?? '';
+      if (!isValidPhaseId(phaseId)) {
+        return simpleResult(
+          `Cannot finalize build: phase id ${JSON.stringify(phaseId)} is not a valid NN phase id.`,
+          { ok: false, reason: 'bad-phase-id', phaseId },
+        );
+      }
+      const phase = roadmap.phases.find(
+        (candidate) => candidate.id === phaseId,
+      );
+      if (!phase) {
+        return simpleResult(
+          `Cannot finalize build ${planId}: roadmap phase ${phaseId} is missing; run /build first after finalizing the plan.`,
+          { ok: false, reason: 'plan-not-found', planId },
+        );
+      }
+      if (!isValidPhaseId(phase.id)) {
+        return simpleResult(
+          `Cannot finalize build: roadmap phase id ${JSON.stringify(phase.id)} is not a valid NN phase id.`,
+          { ok: false, reason: 'bad-phase-id', phaseId: phase.id },
+        );
+      }
+
+      const phaseDir = `docs/phases/${phase.id}-${slug(phase.name)}`;
+      const planPath = `${phaseDir}/${planId}-PLAN.md`;
+      let planText: string;
+      try {
+        planText = await readFileFs(join(ctx.cwd, planPath), 'utf8');
+      } catch (err) {
+        if (isMissingFileError(err)) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: ${planPath} is missing; run /build first.`,
+            { ok: false, reason: 'plan-not-found', planId },
+          );
+        }
+        throw err;
+      }
+      const plan = parsePlanDoc(planText);
+      if (plan.id !== planId || plan.phase !== phase.id) {
+        return simpleResult(
+          `Cannot finalize build ${planId}: PLAN metadata does not match ROADMAP/STATE; run /build first on the finalized plan.`,
+          { ok: false, reason: 'plan-not-found', planId },
+        );
+      }
+      if (plan.slices.length === 0) {
+        return simpleResult(
+          `Cannot finalize build ${planId}: PLAN has no slices to finalize.`,
+          { ok: false, reason: 'no-slices', planId },
+        );
+      }
+
+      const entries = sessionEntries(ctx.sessionManager);
+      const cycles = changeReviewCyclesForPlan(entries, planId);
+      const latestCycles = latestBySlice(cycles);
+      const acceptWarnings = params.acceptWarnings === true;
+      let acceptedWarnings = 0;
+
+      for (const slice of plan.slices) {
+        const latest = latestCycles.get(slice.n);
+        if (!latest) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: slice ${slice.n} has no persisted change-review-cycle. Re-run /build for this plan.`,
+            { ok: false, reason: 'missing-cycle', planId, sliceN: slice.n },
+          );
+        }
+        if (!latest.ok) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: slice ${slice.n} latest review cycle failed (${latest.status}). Re-run /build for this slice.`,
+            {
+              ok: false,
+              reason: 'slice-failed',
+              planId,
+              sliceN: slice.n,
+              status: latest.status,
+            },
+          );
+        }
+        if (!latest.verify.ok) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: slice ${slice.n} verification failed. Failing verify can never be accepted; fix the slice and rerun /build.`,
+            { ok: false, reason: 'verify-failed', planId, sliceN: slice.n },
+          );
+        }
+        if (latest.review.blockers.length > 0) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: slice ${slice.n} still has blocker(s). Blockers can never be accepted; fix the slice and rerun /build.`,
+            {
+              ok: false,
+              reason: 'blockers',
+              planId,
+              sliceN: slice.n,
+              review: latest.review,
+            },
+          );
+        }
+        const warningCount = latest.review.warnings.length;
+        if (warningCount > 0 && !acceptWarnings) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: slice ${slice.n} has ${warningCount} warning(s). Either address them and rerun /build, or set acceptWarnings: true after explicit user acceptance.`,
+            {
+              ok: false,
+              reason: 'warnings',
+              planId,
+              sliceN: slice.n,
+              review: latest.review,
+            },
+          );
+        }
+        acceptedWarnings += warningCount;
+      }
+
+      const storedChanges = storedCandidateChangesForPlan(entries, planId);
+      const outOfScopeMatches: OutOfScopeMatch[] = [];
+      for (const slice of plan.slices) {
+        const latest = latestCycles.get(slice.n);
+        if (!latest) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: slice ${slice.n} has no persisted change-review-cycle. Re-run /build for this plan.`,
+            { ok: false, reason: 'missing-cycle', planId, sliceN: slice.n },
+          );
+        }
+        const reviewedStoredChanges = storedChanges.filter(
+          (change) =>
+            change.planId === planId &&
+            change.sliceN === latest.sliceN &&
+            change.iteration === latest.iteration &&
+            change.change === latest.candidateChange,
+        );
+        if (reviewedStoredChanges.length === 0) {
+          return simpleResult(
+            `Cannot finalize build ${planId}: slice ${slice.n} latest review cycle has no matching stored candidate change for iteration ${latest.iteration}. Re-run /build for this slice before finalizing.`,
+            {
+              ok: false,
+              reason: 'missing-stored-change',
+              planId,
+              sliceN: slice.n,
+              iteration: latest.iteration,
+            },
+          );
+        }
+        const touchedFiles = new Set<string>();
+        for (const stored of reviewedStoredChanges) {
+          for (const file of stored.touchedFiles ?? []) touchedFiles.add(file);
+        }
+        for (const file of touchedFiles) {
+          const match = findOutOfScopeMatch(file, plan.outOfScope);
+          if (match) outOfScopeMatches.push(match);
+        }
+      }
+      if (outOfScopeMatches.length > 0) {
+        return simpleResult(
+          `Cannot finalize build ${planId}: stored touched files include out-of-scope path(s): ${outOfScopeMatches
+            .map((match) => `${match.file} (${match.pattern})`)
+            .join(', ')}.`,
+          {
+            ok: false,
+            reason: 'out-of-scope',
+            matches: outOfScopeMatches,
+          },
+        );
+      }
+
+      const requirementsById = new Map(
+        requirements.requirements.map((req) => [req.id, req]),
+      );
+      const unresolvedReqIds = planAndSliceReqIds(plan).filter(
+        (reqId) => !requirementsById.has(reqId),
+      );
+      if (unresolvedReqIds.length > 0) {
+        return simpleResult(
+          `Cannot finalize build ${planId}: unresolved requirement id(s): ${unresolvedReqIds.join(', ')}.`,
+          { ok: false, reason: 'unresolved-req', reqIds: unresolvedReqIds },
+        );
+      }
+      const unclaimedReqIds = sliceReqIdsNotClaimed(plan);
+      if (unclaimedReqIds.length > 0) {
+        return simpleResult(
+          `Cannot finalize build ${planId}: slice requirement id(s) are not claimed by the plan metadata: ${unclaimedReqIds.join(', ')}.`,
+          {
+            ok: false,
+            reason: 'slice-req-not-claimed',
+            reqIds: unclaimedReqIds,
+          },
+        );
+      }
+
+      const summaryRel = `${phaseDir}/${planId}-SUMMARY.md`;
+      const planSliceNs = new Set(plan.slices.map((slice) => slice.n));
+      const latestAccepted = latestAcceptedCycle(
+        cycles,
+        latestCycles,
+        planSliceNs,
+      );
+      const verifyCommand =
+        plan.verify === 'none'
+          ? null
+          : (plan.verify ?? latestAccepted?.verify.command ?? null);
+      const commitRange = deriveCommitRange(
+        commitRangesFromSliceResults(entries, planId),
+      );
+      const verifyEvidence: VerifyEvidence = {
+        command: verifyCommand,
+        ok: true,
+      };
+      const advancedState = advanceStateAfterBuild(state, roadmap, planId);
+      const closedRequirements = closeRequirements(requirements, plan.reqIds, {
+        planId,
+        summaryPath: summaryRel,
+        verify: verifyEvidence,
+        ...(commitRange !== undefined ? { commitRange } : {}),
+      });
+
+      const requirementsClosed = plan.reqIds.map((reqId) => {
+        const req = requirementsById.get(reqId);
+        return `- ${reqId}: ${req?.text ?? ''}`;
+      });
+      let summaryDoc = (await readTemplate('SUMMARY')).replace(
+        /^# Summary NN-MM/m,
+        `# Summary ${planId}`,
+      );
+      summaryDoc = replaceMarkdownSection(
+        summaryDoc,
+        'Summary',
+        String(params.summary).trim() || '_none_',
+      );
+      summaryDoc = replaceMarkdownSection(
+        summaryDoc,
+        'Deliverables',
+        bulletsOrNone(params.deliverables as string[]),
+      );
+      summaryDoc = replaceMarkdownSection(
+        summaryDoc,
+        'Requirements closed',
+        requirementsClosed.length > 0
+          ? requirementsClosed.join('\n')
+          : '- _none_',
+      );
+      summaryDoc = replaceMarkdownSection(
+        summaryDoc,
+        'Attempts / Blockers',
+        sectionBody(renderAttemptsTable(cycles)),
+      );
+
+      const stateDoc = replaceJsonBlock(
+        await readTemplate('STATE'),
+        serializeStateBlock(advancedState),
+      );
+      const requirementsDoc = replaceJsonBlock(
+        await readTemplate('REQUIREMENTS'),
+        serializeRequirementsBlock(closedRequirements),
+      );
+
+      await atomicWriteAll(
+        [
+          { path: join(ctx.cwd, summaryRel), content: summaryDoc },
+          { path: join(ctx.cwd, 'docs', 'STATE.md'), content: stateDoc },
+          {
+            path: join(ctx.cwd, 'docs', 'REQUIREMENTS.md'),
+            content: requirementsDoc,
+          },
+        ],
+        writeIo,
+      );
+      await clearBuildArtifacts(ctx.cwd);
+
+      const finalized: GsdBuildFinalized = {
+        planId,
+        phaseId: phase.id,
+        summaryPath: summaryRel,
+        reqIds: plan.reqIds,
+        ...(acceptedWarnings > 0 ? { acceptedWarnings } : {}),
+      };
+      pi.appendEntry(ENTRY.buildFinalized, finalized);
+      const warningText =
+        acceptedWarnings > 0
+          ? ` (${acceptedWarnings} warning(s) explicitly accepted)`
+          : '';
+      return simpleResult(
+        `Finalized build ${planId}: wrote ${summaryRel}, advanced STATE, closed ${plan.reqIds.length} requirement(s)${warningText}.`,
+        {
+          ok: true,
+          planId,
+          summaryPath: summaryRel,
+          reqIds: plan.reqIds,
+          acceptedWarnings,
+        },
+      );
+    },
+  });
 }
 
 export function toolStoreCandidateChange(pi: BuildToolAPI): ToolDefinition {

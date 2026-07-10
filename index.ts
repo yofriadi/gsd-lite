@@ -10,6 +10,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { cmdBuild } from './src/build-command.js';
 import {
+  toolFinalizeBuild,
   toolStoreCandidateChange,
   toolValidateChange,
 } from './src/build-tools.js';
@@ -30,8 +31,9 @@ export default function register(pi: ExtensionAPI): void {
   pi.registerTool(toolScaffoldDocs());
   pi.registerTool(toolStoreCandidateChange(pi));
   pi.registerTool(toolValidateChange(pi));
+  pi.registerTool(toolFinalizeBuild(pi));
   pi.registerCommand('plan', cmdPlan(pi));
   pi.registerCommand('init', cmdInit(pi));
-  // finalize-build is added in Phase 6; /build currently emits the terminal prompt that will trigger it.
+  // /build emits the terminal prompt that triggers finalize-build.
   pi.registerCommand('build', cmdBuild(pi));
 }
