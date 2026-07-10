@@ -343,7 +343,7 @@ export function planFingerprint(plan: string): ReviewReadFingerprint {
   };
 }
 
-function fingerprintEquals(
+export function fingerprintEquals(
   a: ReviewReadFingerprint,
   b: ReviewReadFingerprint,
 ): boolean {

@@ -311,6 +311,7 @@ export interface GsdStoredCandidateChange {
   sliceN: number;
   path: string;
   change: string;
+  touchedFiles?: string[];
 }
 
 /** Durable record that a plan's SUMMARY was written from clean slice cycles. */

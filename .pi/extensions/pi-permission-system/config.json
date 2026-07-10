@@ -1,0 +1,57 @@
+{
+  "$schema": "https://raw.githubusercontent.com/gotgenes/pi-packages/main/packages/pi-permission-system/schemas/permissions.schema.json",
+  "permission": {
+    "*": "ask",
+    "read": "allow",
+    "grep": "allow",
+    "find": "allow",
+    "ls": "allow",
+    "bash": { "*": "allow" },
+    "write": {
+      "*": "allow",
+      "docs/PROJECT.md": {
+        "action": "deny",
+        "reason": "PROJECT.md is written only by finalize-init; route writes through the gated tool."
+      },
+      "docs/REQUIREMENTS.md": {
+        "action": "deny",
+        "reason": "REQUIREMENTS.md is written only by finalize-plan/finalize-build; route writes through the gated tool."
+      },
+      "docs/ROADMAP.md": {
+        "action": "deny",
+        "reason": "ROADMAP.md is written only by finalize-plan; route writes through the gated tool."
+      },
+      "docs/STATE.md": {
+        "action": "deny",
+        "reason": "STATE.md is written only by finalize-plan/finalize-build; route writes through the gated tool."
+      },
+      "docs/phases/*-SUMMARY.md": {
+        "action": "deny",
+        "reason": "SUMMARY docs are written only by finalize-build; route writes through the gated tool."
+      }
+    },
+    "edit": {
+      "*": "allow",
+      "docs/PROJECT.md": {
+        "action": "deny",
+        "reason": "PROJECT.md is written only by finalize-init; route writes through the gated tool."
+      },
+      "docs/REQUIREMENTS.md": {
+        "action": "deny",
+        "reason": "REQUIREMENTS.md is written only by finalize-plan/finalize-build; route writes through the gated tool."
+      },
+      "docs/ROADMAP.md": {
+        "action": "deny",
+        "reason": "ROADMAP.md is written only by finalize-plan; route writes through the gated tool."
+      },
+      "docs/STATE.md": {
+        "action": "deny",
+        "reason": "STATE.md is written only by finalize-plan/finalize-build; route writes through the gated tool."
+      },
+      "docs/phases/*-SUMMARY.md": {
+        "action": "deny",
+        "reason": "SUMMARY docs are written only by finalize-build; route writes through the gated tool."
+      }
+    }
+  }
+}
